@@ -1,5 +1,5 @@
-SCRIPT_NAME    = "Whisper "
-SCRIPT_VERSION = "1.0"
+SCRIPT_NAME    = "Whisper"
+SCRIPT_VERSION = " 1.0"
 SCRIPT_AUTHOR  = "HEIBA"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
@@ -45,20 +45,21 @@ SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 AUDIO_TEMP_DIR = os.path.join(SCRIPT_PATH, "audio_temp")
 SUB_TEMP_DIR = os.path.join(SCRIPT_PATH, "sub_temp")
 RAND_CODE = "".join(random.choices(string.digits, k=2))
+
 ui       = fusion.UIManager
 dispatcher = bmd.UIDispatcher(ui)
 loading_win = dispatcher.AddWindow(
     {
-        "ID": "LoadingWin",                            # 窗口唯一 ID
-        "WindowTitle": "Loading",                     # 窗口标题
+        "ID": "LoadingWin",                            
+        "WindowTitle": "Loading",                     
         "Geometry": [X_CENTER, Y_CENTER, WINDOW_WIDTH, WINDOW_HEIGHT],                  # [x, y, width, height]
-        "Spacing": 10,                                # 内部控件间距，可选
-        "StyleSheet": "*{font-size:14px;}"            # 样式，可选
+        "Spacing": 10,                                
+        "StyleSheet": "*{font-size:14px;}"            
     },
     [
-        ui.VGroup(                                  # 垂直布局组
+        ui.VGroup(                                  
             [
-                ui.Label(                          # 提示文字
+                ui.Label(                          
                     {
                         "ID": "LoadLabel", 
                         "Text": "Loading...",
@@ -71,13 +72,41 @@ loading_win = dispatcher.AddWindow(
 )
 loading_win.Show()
 
+# ================== DaVinci Resolve 接入 ==================
+try:
+    import DaVinciResolveScript as dvr_script
+    from python_get_resolve import GetResolve
+    print("DaVinciResolveScript from Python")
+except ImportError:
+    # mac / windows 常规路径补全
+    if platform.system() == "Darwin": 
+        path1 = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Examples"
+        path2 = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"
+    elif platform.system() == "Windows":
+        path1 = os.path.join(os.environ['PROGRAMDATA'], "Blackmagic Design", "DaVinci Resolve", "Support", "Developer", "Scripting", "Examples")
+        path2 = os.path.join(os.environ['PROGRAMDATA'], "Blackmagic Design", "DaVinci Resolve", "Support", "Developer", "Scripting", "Modules")
+    else:
+        raise EnvironmentError("Unsupported operating system")
+    sys.path += [path1, path2]
+    import DaVinciResolveScript as dvr_script
+    from python_get_resolve import GetResolve
+    print("DaVinciResolveScript from DaVinci")
+
+def connect_resolve():
+    project_manager = resolve.GetProjectManager()
+    project = project_manager.GetCurrentProject()
+    media_pool = project.GetMediaPool(); 
+    root_folder = media_pool.GetRootFolder()
+    timeline      = project.GetCurrentTimeline()
+    fps     = float(project.GetSetting("timelineFrameRate"))
+    return resolve, project, media_pool,root_folder,timeline, fps
+
 if not hasattr(sys.stderr, "flush"):
     sys.stderr.flush = lambda: None
 
 try:
     import faster_whisper
 except ImportError:
-    # 根据不同平台设置 Lib 目录为绝对路径
     system = platform.system()
     if system == "Windows":
         program_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
@@ -87,7 +116,7 @@ except ImportError:
             "DaVinci Resolve",
             "Fusion",
             "HB",
-            "Whisper",
+            SCRIPT_NAME,
             "Lib"
         )
     elif system == "Darwin":
@@ -98,12 +127,12 @@ except ImportError:
             "DaVinci Resolve",
             "Fusion",
             "HB",
-            "Whisper",
+            SCRIPT_NAME,
             "Lib"
         )
     else:
         lib_dir = os.path.normpath(
-            os.path.join(SCRIPT_PATH, "..", "..", "..", "HB", "Whisper", "Lib")
+            os.path.join(SCRIPT_PATH, "..", "..", "..", "HB", SCRIPT_NAME, "Lib")
         )
 
     lib_dir = os.path.normpath(lib_dir)
@@ -129,8 +158,6 @@ win = dispatcher.AddWindow(
     },
     [
         ui.VGroup([
-
-                # ===== 4.1 翻译页 =====
                 ui.VGroup({"Weight":1},[
                     ui.Label({"ID":"TitleLabel","Text":"Create subtitles from audio","Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
                     ui.HGroup({"Weight":0.1},[
@@ -190,13 +217,11 @@ msgbox = dispatcher.AddWindow(
 
 def show_warning_message(status_tuple):
     use_english = items["LangEnCheckBox"].Checked
-    # 元组索引 0 为英文，1 为中文
     message = status_tuple[0] if use_english else status_tuple[1]
     msgbox.Show()
     msg_items["WarningLabel"].Text = message
 
 def show_dynamic_message(en_text, zh_text):
-    """直接弹窗显示任意中英文文本的动态消息"""
     use_en = items["LangEnCheckBox"].Checked
     msg = en_text if use_en else zh_text
     msgbox.Show()
@@ -248,8 +273,6 @@ def switch_language(lang):
             items[item_id].Text = text_value
         else:
             print(f"[Warning] No control with ID {item_id} exists in items, so the text cannot be set!")
-    # 缓存复选框状态
-    checked = items["LangEnCheckBox"].Checked
 
 def on_cn_checkbox_clicked(ev):
     items["LangEnCheckBox"].Checked = not items["LangCnCheckBox"].Checked
@@ -270,16 +293,6 @@ def on_en_checkbox_clicked(ev):
         print("cn")
         switch_language("cn")
 win.On.LangEnCheckBox.Clicked = on_en_checkbox_clicked
-
-# 连接 DaVinci Resolve
-def connect_resolve():
-    project_manager = resolve.GetProjectManager()
-    project = project_manager.GetCurrentProject()
-    media_pool = project.GetMediaPool(); 
-    root_folder = media_pool.GetRootFolder()
-    timeline      = project.GetCurrentTimeline()
-    fps     = float(project.GetSetting("timelineFrameRate"))
-    return resolve, project, media_pool,root_folder,timeline, fps
 
 def import_srt_to_first_empty(path):
     resolve, current_project, current_media_pool, current_root_folder, current_timeline, fps = connect_resolve()
@@ -366,7 +379,7 @@ def render_timeline_audio(
     output_dir: str = "./exports",
     sample_rate: int = 48000,
     bit_depth: int = 16,
-    audio_codec: str = "aac" # 知识库中 "aac" 是示例, 对于WAV, pcm更合适
+    audio_codec: str = "aac" 
 ) -> Optional[str]:
     """
     渲染当前时间线的音频并导出为 WAV 文件，并等待渲染完成。
@@ -380,8 +393,7 @@ def render_timeline_audio(
         print("错误: 未打开任何时间线")
         return None
 
-    # 使用时间线名称生成音频文件名
-    timeline_name = current_timeline.GetName() # 
+    timeline_name = current_timeline.GetName() 
     safe_name = timeline_name.replace(" ", "_")
     
     custom_name = f"{safe_name}_audio"
@@ -389,10 +401,6 @@ def render_timeline_audio(
     # 确保输出路径存在
     os.makedirs(output_dir, exist_ok=True)
 
-    # 设置渲染参数（仅导出音频）
-    # 注意: 知识库中没有明确指出 "Format":"WAV" 的用法，但这是行业标准。
-    # "AudioCodec" 对于 WAV 格式，通常是未压缩的 PCM。
-    # "aac" 更适用于 MP4 等容器。这里我们假定 API 内部能处理。
     settings = {
         "SelectAllFrames": True,
         "ExportVideo": False, 
@@ -404,7 +412,6 @@ def render_timeline_audio(
         "AudioBitDepth": bit_depth, 
     }
 
-    # 应用渲染设置并添加渲染任务
     current_project.SetRenderSettings(settings) 
     job_id = current_project.AddRenderJob() 
     if not job_id:
@@ -420,19 +427,18 @@ def render_timeline_audio(
         
     print("渲染已启动，正在等待完成...")
 
-    # --- 新增的等待逻辑 ---
     # 循环检查渲染是否仍在进行中
     while current_project.IsRenderingInProgress(): # 
-        # 打印进度，让用户知道没有卡死
         # GetRenderJobStatus可以提供更详细的进度，这里用简单的等待
         print("渲染进行中...")
-        time.sleep(2)  # 每2秒检查一次，避免CPU占用过高
+        time.sleep(2)  
 
     print("渲染完成!")
     
     rendered_filepath = find_rendered_file(output_dir, custom_name)
 
     return rendered_filepath
+
 def _format_time(seconds: float) -> str:
     """将秒数格式化为 hh:mm:ss,ms 的 SRT 时间戳格式。"""
     milliseconds = int((seconds % 1) * 1000)
@@ -486,14 +492,14 @@ def _progress_reporter(
     segments_gen,
     total_duration: float,
     callback,
-    max_fps: float = 10.0  # 最多每秒刷新 10 次；设为 0 表示无节流
+    max_fps: float = 10.0  
 ):
     """
     • 对 faster-whisper 的 Segment 生成器做包装
     • 每收到一个 Segment 就立即计算进度并回调
     • 通过 max_fps 控制刷新上限，防止极端情况下过度调用
     """
-    if total_duration <= 0:          # 极端兜底
+    if total_duration <= 0:          
         for seg in segments_gen:
             yield seg
         callback(100.0)
@@ -513,9 +519,9 @@ def _progress_reporter(
             last_report_ts = now
             callback(progress)
 
-        yield seg               # 继续向下游传递
+        yield seg               
 
-    if progress < 100.0:        # 收尾兜底
+    if progress < 100.0:        
         callback(100.0)
 
 def generate_srt(
@@ -524,70 +530,60 @@ def generate_srt(
     language: Optional[str] = None,
     output_dir: str = ".",
     output_filename: Optional[str] = None,
-    max_chars: int = 40,  # 新增参数，控制每块字幕的最大字符数
+    max_chars: int = 40,
     verbose: bool = True,
     progress_callback: Optional[callable] = None
 ) -> Optional[str]:
     """
     使用 faster-whisper 转录音频，并生成具有字级时间戳和长度限制的 SRT 字幕文件。
-
-    Args:
-        input_audio: 输入的音频文件路径。
-        model_name: 使用的 whisper 模型名称 (例如, "base", "small", "large-v3")。
-        output_dir: SRT 文件的输出目录。
-        output_filename: 输出文件的基本名称 (不含扩展名)。
-        max_chars: 每个字幕块的最大字符数。
-        verbose: 是否打印详细日志。
-        progress_callback: 用于报告进度的回调函数。
-
-    Returns:
-        生成的 SRT 文件的路径，如果失败则返回 None。
+    模型加载失败时，弹窗提示并返回 None。
     """
+    # --- 1. 尝试加载模型，失败则弹窗提示 ---
+    local_model_path = os.path.join(SCRIPT_PATH, "model", model_name)
     try:
-        # --- 1. 加载 faster-whisper 模型 ---
         if verbose:
             print(f"正在加载 faster-whisper 模型 '{model_name}'...")
-        local_model_path = os.path.join(SCRIPT_PATH, "model", model_name)
         model = faster_whisper.WhisperModel(local_model_path)
         if verbose:
             print(f"模型 '{model_name}' 加载成功。")
-
-        transcribe_args = {"beam_size": 5, "word_timestamps": True}
-        if language:
-            transcribe_args["language"] = language
-
-        if verbose:
-            print(f"[Whisper] 开始转录：{input_audio}")
-
-        segments_gen, info = model.transcribe(input_audio, **transcribe_args)
-
-        # 3. 包装生成器，按改良算法汇报进度
-        if progress_callback:
-            segments_gen = _progress_reporter(segments_gen, info.duration, progress_callback)
-
-        # 4. 按行长重新组合字幕块
-        subtitle_blocks = _split_segments_by_max_chars(segments_gen, max_chars)
-
-        # 5. 生成 SRT 文件
-        if not output_filename:
-            base = os.path.splitext(os.path.basename(input_audio))[0]
-            output_filename = f"{base}_whisper"
-        os.makedirs(output_dir, exist_ok=True)
-        srt_path = os.path.join(output_dir, f"{output_filename}.srt")
-
-        with open(srt_path, "w", encoding="utf-8") as f:
-            for idx, blk in enumerate(subtitle_blocks, 1):
-                f.write(f"{idx}\n")
-                f.write(f"{_format_time(blk['start'])} --> {_format_time(blk['end'])}\n")
-                f.write(f"{blk['text'].strip()}\n\n")
-
-        if verbose:
-            print(f"[Whisper] 已生成 SRT：{srt_path}")
-        return srt_path
-
     except Exception as e:
-        print(f"[Whisper] 生成 SRT 失败：{e}")
+        # 英/中文提示文案
+        en_msg = f"Model '{model_name}' is unavailable"
+        zh_msg = f"模型'{model_name}'不可用"
+        show_dynamic_message(en_msg, zh_msg)
         return None
+
+    # --- 2. 构建转录参数并执行转录 ---
+    transcribe_args = {"beam_size": 5, "word_timestamps": True}
+    if language:
+        transcribe_args["language"] = language
+    if verbose:
+        print(f"[Whisper] 开始转录：{input_audio}")
+    segments_gen, info = model.transcribe(input_audio, **transcribe_args)
+
+    # --- 3. 进度回调包装 ---
+    if progress_callback:
+        segments_gen = _progress_reporter(segments_gen, info.duration, progress_callback)
+
+    # --- 4. 分段控制 ---
+    subtitle_blocks = _split_segments_by_max_chars(segments_gen, max_chars)
+
+    # --- 5. 写入 SRT 文件 ---
+    if not output_filename:
+        base = os.path.splitext(os.path.basename(input_audio))[0]
+        output_filename = f"{base}_whisper"
+    os.makedirs(output_dir, exist_ok=True)
+    srt_path = os.path.join(output_dir, f"{output_filename}.srt")
+
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for idx, blk in enumerate(subtitle_blocks, 1):
+            f.write(f"{idx}\n")
+            f.write(f"{_format_time(blk['start'])} --> {_format_time(blk['end'])}\n")
+            f.write(f"{blk['text'].strip()}\n\n")
+
+    if verbose:
+        print(f"[Whisper] 已生成 SRT：{srt_path}")
+    return srt_path
 
 def on_create_clicked(ev):
     
@@ -596,14 +592,11 @@ def on_create_clicked(ev):
     model_name = items["ModelCombo"].CurrentText
     max_chars  = int(items["MaxChars"].Text)
     display_name = items["LangCombo"].CurrentText
-    status_label = items["StatusLabel"]
 
     def update_transcribe_progress(progress):
         en = f"Transcribing... {progress:.1f}%"
         zh = f"转录中... {progress:.1f}%"
         show_dynamic_message(en, zh)
-        #status_label.Text = f"Transcribing... {progress:.1f}%"
-
 
     try:
         show_dynamic_message("Rendering audio...","音频处理... ")
@@ -628,11 +621,12 @@ def on_create_clicked(ev):
                 import_srt_to_first_empty(srt_path)
                 show_dynamic_message("Finished! 100% ","转录完成！")
             else:
-                status_label.Text = "Failed to generate SRT."
+                ...
+                #show_dynamic_message("Failed to generate SRT. ","转录失败！")
         else:
-            status_label.Text = "Failed to render audio."
+            show_dynamic_message("Failed to render audio. ","渲染失败！")
     except Exception as e:
-        status_label.Text = f"Error: {e}"
+        show_dynamic_message(f"Error: {e} ",f"错误: {e} ")
         print(f"An error occurred: {e}")
         
 win.On.CreateButton.Clicked = on_create_clicked
@@ -645,23 +639,19 @@ def on_open_link_button_clicked(ev):
 win.On.CopyrightButton.Clicked = on_open_link_button_clicked
 
 def on_close(ev):
-    # Clean up temporary directories
-    audio_temp_dir = os.path.join(SCRIPT_PATH, "audio_temp")
-    sub_temp_dir = os.path.join(SCRIPT_PATH, "sub_temp")
-    
-    if os.path.exists(audio_temp_dir):
+    if os.path.exists(AUDIO_TEMP_DIR):
         try:
-            shutil.rmtree(audio_temp_dir)
-            print(f"Removed temporary directory: {audio_temp_dir}")
+            shutil.rmtree(AUDIO_TEMP_DIR)
+            print(f"Removed temporary directory: {AUDIO_TEMP_DIR}")
         except OSError as e:
-            print(f"Error removing directory {audio_temp_dir}: {e.strerror}")
+            print(f"Error removing directory {AUDIO_TEMP_DIR}: {e.strerror}")
 
-    if os.path.exists(sub_temp_dir):
+    if os.path.exists(SUB_TEMP_DIR):
         try:
-            shutil.rmtree(sub_temp_dir)
-            print(f"Removed temporary directory: {sub_temp_dir}")
+            shutil.rmtree(SUB_TEMP_DIR)
+            print(f"Removed temporary directory: {SUB_TEMP_DIR}")
         except OSError as e:
-            print(f"Error removing directory {sub_temp_dir}: {e.strerror}")
+            print(f"Error removing directory {SUB_TEMP_DIR}: {e.strerror}")
             
     dispatcher.ExitLoop()
 win.On.MyWin.Close = on_close
