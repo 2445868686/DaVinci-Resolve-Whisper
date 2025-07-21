@@ -45,6 +45,31 @@ SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 AUDIO_TEMP_DIR = os.path.join(SCRIPT_PATH, "audio_temp")
 SUB_TEMP_DIR = os.path.join(SCRIPT_PATH, "sub_temp")
 RAND_CODE = "".join(random.choices(string.digits, k=2))
+ui       = fusion.UIManager
+dispatcher = bmd.UIDispatcher(ui)
+loading_win = dispatcher.AddWindow(
+    {
+        "ID": "LoadingWin",                            # 窗口唯一 ID
+        "WindowTitle": "Loading",                     # 窗口标题
+        "Geometry": [X_CENTER, Y_CENTER, WINDOW_WIDTH, WINDOW_HEIGHT],                  # [x, y, width, height]
+        "Spacing": 10,                                # 内部控件间距，可选
+        "StyleSheet": "*{font-size:14px;}"            # 样式，可选
+    },
+    [
+        ui.VGroup(                                  # 垂直布局组
+            [
+                ui.Label(                          # 提示文字
+                    {
+                        "ID": "LoadLabel", 
+                        "Text": "Loading...",
+                        "Alignment": {"AlignHCenter": True, "AlignVCenter": True},
+                    }
+                )
+            ]
+        )
+    ]
+)
+loading_win.Show()
 
 if not hasattr(sys.stderr, "flush"):
     sys.stderr.flush = lambda: None
@@ -93,8 +118,7 @@ except ImportError:
     except ImportError as e:
         print("Dependency import failed—please make sure all dependencies are bundled into the Lib directory:", lib_dir, "\nError message:", e)
 
-ui       = fusion.UIManager
-dispatcher = bmd.UIDispatcher(ui)
+
 win = dispatcher.AddWindow(
     {
         "ID": 'MyWin',
@@ -108,21 +132,21 @@ win = dispatcher.AddWindow(
 
                 # ===== 4.1 翻译页 =====
                 ui.VGroup({"Weight":1},[
-                    ui.Label({"ID":"TitleLabel","Text":"从音频创建字幕","Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
+                    ui.Label({"ID":"TitleLabel","Text":"Create subtitles from audio","Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
                     ui.HGroup({"Weight":0.1},[
-                        ui.Label({"ID":"ModelLabel","Text":"模型","Weight":0.1}),
+                        ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.1}),
                         ui.ComboBox({"ID":"ModelCombo","Weight":0.1}),
                     ]),
                     ui.HGroup({"Weight":0.1},[
-                        ui.Label({"ID":"LangLabel","Text":"语言","Weight":0.1}),
+                        ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.1}),
                         ui.ComboBox({"ID":"LangCombo","Weight":0.1}),
                     ]),
                     ui.HGroup({"Weight":0.1},[
-                        ui.Label({"ID":"MaxCharsLabel","Text":"最大值","Weight":0.1}),
+                        ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.1}),
                         ui.LineEdit({"ID":"MaxChars","Text":"42","ReadOnly":False,"Weight":0.1}),
                     ]),
-                    ui.Button({"ID":"CreateButton","Text":"创建","Weight":0.15}),
-                    ui.Label({"ID": "StatusLabel", "Text": " ", "Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
+                    ui.Button({"ID":"CreateButton","Text":"Create","Weight":0.15}),
+                    #ui.Label({"ID": "StatusLabel", "Text": " ", "Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
                     ui.HGroup({"Weight":0.1},[
                         ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
                         ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":1}),
@@ -195,9 +219,9 @@ translations = {
 
     "en": {
         "TitleLabel":"Create subtitles from audio",
-        "LangLabel":"Target Language",
+        "LangLabel":"Language",
         "ModelLabel":"Model",
-        "CreateButton":"Translate",
+        "CreateButton":"Create",
         "MaxCharsLabel":"Max Chars",
         
     }
@@ -531,15 +555,12 @@ def generate_srt(
         transcribe_args = {"beam_size": 5, "word_timestamps": True}
         if language:
             transcribe_args["language"] = language
-           
 
         if verbose:
             print(f"[Whisper] 开始转录：{input_audio}")
 
         segments_gen, info = model.transcribe(input_audio, **transcribe_args)
 
-        if verbose:
-            print(f"[Whisper] language:{info.language}")
         # 3. 包装生成器，按改良算法汇报进度
         if progress_callback:
             segments_gen = _progress_reporter(segments_gen, info.duration, progress_callback)
@@ -607,9 +628,9 @@ def on_create_clicked(ev):
                 import_srt_to_first_empty(srt_path)
                 show_dynamic_message("Finished! 100% ","转录完成！")
             else:
-                show_dynamic_message("Failed to generate SRT! ","转录失败！ ")
+                status_label.Text = "Failed to generate SRT."
         else:
-            show_dynamic_message("Failed to render audio! ","渲染失败！ ")
+            status_label.Text = "Failed to render audio."
     except Exception as e:
         status_label.Text = f"Error: {e}"
         print(f"An error occurred: {e}")
@@ -645,6 +666,7 @@ def on_close(ev):
     dispatcher.ExitLoop()
 win.On.MyWin.Close = on_close
 
+loading_win.Hide() 
 win.Show(); 
 dispatcher.RunLoop(); 
 win.Hide(); 
