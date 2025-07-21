@@ -1,9 +1,9 @@
-SCRIPT_NAME    = "Whisper"
+SCRIPT_NAME    = "DaVinci Whisper"
 SCRIPT_VERSION = " 1.0"
 SCRIPT_AUTHOR  = "HEIBA"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-WINDOW_WIDTH, WINDOW_HEIGHT = 300, 300
+WINDOW_WIDTH, WINDOW_HEIGHT = 300, 350
 X_CENTER = (SCREEN_WIDTH  - WINDOW_WIDTH ) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
@@ -39,7 +39,7 @@ import random
 import webbrowser
 import string
 import shutil
-from typing import Optional, List, Generator
+from typing import Optional, List, Generator,Dict
 
 SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 AUDIO_TEMP_DIR = os.path.join(SCRIPT_PATH, "audio_temp")
@@ -170,10 +170,12 @@ win = dispatcher.AddWindow(
                     ]),
                     ui.HGroup({"Weight":0.1},[
                         ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.1}),
-                        ui.LineEdit({"ID":"MaxChars","Text":"42","ReadOnly":False,"Weight":0.1}),
+                        ui.SpinBox({"ID": "MaxChars", "Minimum": 0, "Maximum": 100, "Value": 42, "SingleStep": 1, "Weight": 0.1}),
                     ]),
                     ui.Button({"ID":"CreateButton","Text":"Create","Weight":0.15}),
                     #ui.Label({"ID": "StatusLabel", "Text": " ", "Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
+                    ui.Label({"ID":"HotwordsLabel","Text":"Phrases","Weight":0.1}),
+                    ui.TextEdit({"ID":"Hotwords","Text":"","Weight":0.1}),
                     ui.HGroup({"Weight":0.1},[
                         ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
                         ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":1}),
@@ -238,6 +240,7 @@ translations = {
         "LangLabel":"语言",
         "ModelLabel":"模型",
         "CreateButton":"创建",
+        "Hotwords":"短语列表",
         "MaxCharsLabel":"每行最大字符",
         
     },
@@ -247,6 +250,7 @@ translations = {
         "LangLabel":"Language",
         "ModelLabel":"Model",
         "CreateButton":"Create",
+        "Hotwords":"Phrases",
         "MaxCharsLabel":"Max Chars",
         
     }
@@ -447,9 +451,10 @@ def _format_time(seconds: float) -> str:
 def _split_segments_by_max_chars(
     segments: Generator[faster_whisper.transcribe.Segment, None, None],
     max_chars: int
-) -> List[dict]:
+) -> List[Dict]:
     """
-    根据最大字符数将转录的片段分割成字幕块。
+    根据最大字符数将转录的片段分割成字幕块（修复版）。
+    此版本解决了因强制添加空格和处理模型自带前导空格而导致的格式问题。
 
     Args:
         segments: faster-whisper 返回的带字级时间戳的生成器。
@@ -462,27 +467,34 @@ def _split_segments_by_max_chars(
     current_block = {"start": 0, "end": 0, "text": ""}
 
     for segment in segments:
+        
         if not segment.words:
             continue
 
         for word in segment.words:
-            # 检查添加新单词后是否会超过长度限制
-            if len(current_block["text"]) + len(word.word) + 1 > max_chars and current_block["text"]:
-                # 如果超过限制，则保存当前块并开始新块
+            #print(word)
+            # 检查直接添加新单词后（不加额外空格）是否会超过长度限制
+            # 我们直接使用 word.word 的长度，因为模型可能已包含前导空格
+            if len(current_block["text"]) + len(word.word) > max_chars and current_block["text"]:
+                # 如果超过限制，则保存当前块
                 subtitle_blocks.append(current_block)
-                current_block = {"start": word.start, "end": word.end, "text": word.word}
+                # 开始新块。使用 lstrip() 清除第一个单词可能的前导空格，
+                # 避免字幕行以空格开头。
+                current_block = {"start": word.start, "end": word.end, "text": word.word.lstrip()}
             else:
                 # 否则，将单词添加到当前块
                 if not current_block["text"]:
                     # 这是新块的第一个单词
                     current_block["start"] = word.start
-                    current_block["text"] = word.word
+                    # 同样，使用 lstrip() 清除第一个单词的前导空格
+                    current_block["text"] = word.word.lstrip()
                 else:
-                    # 在单词前添加一个空格
-                    current_block["text"] += " " + word.word
+                    # 对于后续单词，直接拼接。
+                    # faster-whisper 会在需要时自带前导空格，我们直接使用即可。
+                    current_block["text"] += word.word
                 current_block["end"] = word.end
 
-    # 添加最后一个字幕块
+    # 添加最后一个字幕块（如果存在）
     if current_block["text"]:
         subtitle_blocks.append(current_block)
 
@@ -531,8 +543,11 @@ def generate_srt(
     output_dir: str = ".",
     output_filename: Optional[str] = None,
     max_chars: int = 40,
+    batch_size: int = 4, 
+    hotwords: Optional[str] = None,  
     verbose: bool = True,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[callable] = None,
+    vad_filter: bool = False
 ) -> Optional[str]:
     """
     使用 faster-whisper 转录音频，并生成具有字级时间戳和长度限制的 SRT 字幕文件。
@@ -544,30 +559,41 @@ def generate_srt(
         if verbose:
             print(f"正在加载 faster-whisper 模型 '{model_name}'...")
         model = faster_whisper.WhisperModel(local_model_path)
+        pipeline = faster_whisper.BatchedInferencePipeline(model=model)
         if verbose:
             print(f"模型 '{model_name}' 加载成功。")
     except Exception as e:
-        # 英/中文提示文案
-        en_msg = f"Model '{model_name}' is unavailable"
-        zh_msg = f"模型'{model_name}'不可用"
-        show_dynamic_message(en_msg, zh_msg)
+        show_dynamic_message(f"Model '{model_name}' is unavailable", f"模型'{model_name}'不可用")
         return None
 
     # --- 2. 构建转录参数并执行转录 ---
-    transcribe_args = {"beam_size": 5, "word_timestamps": True}
+    transcribe_args = {
+        "beam_size": 5,
+        "log_progress":True,
+        "batch_size":batch_size,
+        "word_timestamps": True,
+        "hotwords": hotwords, 
+        "vad_filter": vad_filter
+    }
     if language:
         transcribe_args["language"] = language
     if verbose:
         print(f"[Whisper] 开始转录：{input_audio}")
-    segments_gen, info = model.transcribe(input_audio, **transcribe_args)
-
+        print(transcribe_args)
+    segments_gen, info = pipeline.transcribe(input_audio, **transcribe_args)
+    print(info.language)
     # --- 3. 进度回调包装 ---
     if progress_callback:
         segments_gen = _progress_reporter(segments_gen, info.duration, progress_callback)
 
     # --- 4. 分段控制 ---
+    if info.language in ['zh', 'ja', 'th', 'lo', 'km', 'my', 'bo']:
+        max_chars = max_chars / 2
     subtitle_blocks = _split_segments_by_max_chars(segments_gen, max_chars)
-
+    import re
+    for blk in subtitle_blocks:
+        # (?<=...)\s+(?=...) 仅匹配两汉字之间的空格
+        blk["text"] = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", blk["text"])
     # --- 5. 写入 SRT 文件 ---
     if not output_filename:
         base = os.path.splitext(os.path.basename(input_audio))[0]
@@ -590,14 +616,23 @@ def on_create_clicked(ev):
     from datetime import datetime
     timestamp = datetime.now().strftime("%m%d%H%M")
     model_name = items["ModelCombo"].CurrentText
-    max_chars  = int(items["MaxChars"].Text)
+    max_chars  = items["MaxChars"].Value
     display_name = items["LangCombo"].CurrentText
+    import re
+    raw_hotwords = items["Hotwords"].PlainText or ""
+    hotwords_list = [
+        ph.strip()
+        for ph in re.split(r"[，,、；;]\s*|\s+", raw_hotwords)
+        if ph.strip()
+    ]
+    # 合并为字符串，faster-whisper 接口期望单个字符串
+    hotwords_str = ",".join(hotwords_list) if hotwords_list else None
 
     def update_transcribe_progress(progress):
         en = f"Transcribing... {progress:.1f}%"
         zh = f"转录中... {progress:.1f}%"
         show_dynamic_message(en, zh)
-
+    
     try:
         show_dynamic_message("Rendering audio...","音频处理... ")
         audio_path = render_timeline_audio(output_dir=AUDIO_TEMP_DIR)
@@ -613,7 +648,10 @@ def on_create_clicked(ev):
                 language=LANGUAGE_MAP.get(display_name),
                 output_dir=SUB_TEMP_DIR,
                 max_chars=max_chars,
+                batch_size=4,
+                hotwords = hotwords_str,
                 output_filename=filename,
+                vad_filter=True,
                 progress_callback=update_transcribe_progress
             )
             
@@ -652,7 +690,6 @@ def on_close(ev):
             print(f"Removed temporary directory: {SUB_TEMP_DIR}")
         except OSError as e:
             print(f"Error removing directory {SUB_TEMP_DIR}: {e.strerror}")
-            
     dispatcher.ExitLoop()
 win.On.MyWin.Close = on_close
 
