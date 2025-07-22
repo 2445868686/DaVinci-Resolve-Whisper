@@ -39,6 +39,7 @@ import random
 import webbrowser
 import string
 import shutil
+import glob
 from typing import Optional, List, Generator,Dict
 
 SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -168,17 +169,20 @@ win = dispatcher.AddWindow(
                         ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.1}),
                         ui.ComboBox({"ID":"LangCombo","Weight":0.1}),
                     ]),
+                    
                     ui.HGroup({"Weight":0.1},[
                         ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.1}),
                         ui.SpinBox({"ID": "MaxChars", "Minimum": 0, "Maximum": 100, "Value": 42, "SingleStep": 1, "Weight": 0.1}),
                     ]),
+                    #ui.CheckBox({"ID":"VADCheckBox","Text":"VAD","Checked":False,"Weight":0}),
+                    ui.CheckBox({"ID":"NoGapCheckBox", "Text":"No Gaps Between Subtitles", "Checked":False, "Weight":0}),
                     ui.Button({"ID":"CreateButton","Text":"Create","Weight":0.15}),
                     #ui.Label({"ID": "StatusLabel", "Text": " ", "Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
                     ui.Label({"ID":"HotwordsLabel","Text":"Phrases","Weight":0.1}),
                     ui.TextEdit({"ID":"Hotwords","Text":"","Weight":0.1}),
                     ui.HGroup({"Weight":0.1},[
                         ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
-                        ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":1}),
+                        ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":0}),
                     ]),
                     ui.Button({
                             "ID": "CopyrightButton", 
@@ -240,8 +244,9 @@ translations = {
         "LangLabel":"语言",
         "ModelLabel":"模型",
         "CreateButton":"创建",
-        "Hotwords":"短语列表",
+        "HotwordsLabel":"短语列表",
         "MaxCharsLabel":"每行最大字符",
+        "NoGapCheckBox":"字幕之间无间隙" # <-- Add this line
         
     },
 
@@ -250,8 +255,9 @@ translations = {
         "LangLabel":"Language",
         "ModelLabel":"Model",
         "CreateButton":"Create",
-        "Hotwords":"Phrases",
+        "HotwordsLabel":"Phrases",
         "MaxCharsLabel":"Max Chars",
+        "NoGapCheckBox":"No Gaps Between Subtitles" # <-- Add this line
         
     }
 }    
@@ -380,64 +386,57 @@ def find_rendered_file(output_dir: str, custom_name: str) -> Optional[str]:
         return latest_file
     
 def render_timeline_audio(
-    output_dir: str = "./exports",
+    output_dir: str,
+    custom_name: str,
     sample_rate: int = 48000,
     bit_depth: int = 16,
-    audio_codec: str = "aac" 
+    audio_codec: str = "aac"
 ) -> Optional[str]:
     """
-    渲染当前时间线的音频并导出为 WAV 文件，并等待渲染完成。
+    Renders the current timeline's audio using a specific custom name and waits for completion.
     """
-    resolve, current_project, current_media_pool, current_root_folder, current_timeline, fps = connect_resolve()
+    resolve, current_project, _, _, current_timeline, _ = connect_resolve()
 
     if not current_project:
-        print("错误: 未打开任何项目")
+        print("Error: No project is currently open.")
         return None
     if not current_timeline:
-        print("错误: 未打开任何时间线")
+        print("Error: No timeline is currently open.")
         return None
 
-    timeline_name = current_timeline.GetName() 
-    safe_name = timeline_name.replace(" ", "_")
-    
-    custom_name = f"{safe_name}_audio"
-
-    # 确保输出路径存在
+    # Ensure output path exists
     os.makedirs(output_dir, exist_ok=True)
 
     settings = {
         "SelectAllFrames": True,
-        "ExportVideo": False, 
-        "ExportAudio": True, 
-        "TargetDir": output_dir, 
-        "CustomName": custom_name, 
-        "AudioSampleRate": sample_rate, 
+        "ExportVideo": False,
+        "ExportAudio": True,
+        "TargetDir": output_dir,
+        "CustomName": custom_name,  # Use the provided custom_name
+        "AudioSampleRate": sample_rate,
         "AudioCodec": audio_codec,
-        "AudioBitDepth": bit_depth, 
+        "AudioBitDepth": bit_depth,
     }
 
-    current_project.SetRenderSettings(settings) 
-    job_id = current_project.AddRenderJob() 
+    current_project.SetRenderSettings(settings)
+    job_id = current_project.AddRenderJob()
     if not job_id:
-        print("错误: 渲染任务添加失败")
+        print("Error: Failed to add render job.")
         return None
 
-    print(f"渲染任务已添加, Job ID: {job_id}")
+    print(f"Render job added, ID: {job_id}")
 
-    # 开始渲染
-    if not current_project.StartRendering([job_id],isInteractiveMode=False): # [cite: 97]
-        print("错误: 渲染启动失败")
+    # Start rendering
+    if not current_project.StartRendering([job_id], isInteractiveMode=False):
+        print("Error: Failed to start rendering.")
         return None
         
-    print("渲染已启动，正在等待完成...")
+    print("Rendering in progress, waiting for completion...")
 
-    # 循环检查渲染是否仍在进行中
-    while current_project.IsRenderingInProgress(): # 
-        # GetRenderJobStatus可以提供更详细的进度，这里用简单的等待
-        print("渲染进行中...")
-        time.sleep(2)  
+    while current_project.IsRenderingInProgress():
+        time.sleep(2)  # Wait for 2 seconds before checking again
 
-    print("渲染完成!")
+    print("Render complete!")
     
     rendered_filepath = find_rendered_file(output_dir, custom_name)
 
@@ -453,50 +452,79 @@ def _split_segments_by_max_chars(
     max_chars: int
 ) -> List[Dict]:
     """
-    根据最大字符数将转录的片段分割成字幕块（修复版）。
-    此版本解决了因强制添加空格和处理模型自带前导空格而导致的格式问题。
+    根据最大字符数和自然语言标点，将转录片段智能分割成字幕块。
+
+    此版本优化了分割逻辑：
+    1. 优先在句子或子句的标点处换行。
+    2. 如果在达到max_chars前遇到标点，则提前换行以保证句子完整。
+    3. 如果超出max_chars一点但能以标点结尾，则在20%的容差内“拉伸”行。
 
     Args:
         segments: faster-whisper 返回的带字级时间戳的生成器。
-        max_chars: 每个字幕块的最大字符数。
+        max_chars: 每个字幕块的最大字符数（硬限制）。
 
     Returns:
         一个包含字幕块信息的字典列表 (start, end, text)。
     """
+    END_OF_CLAUSE_CHARS = tuple(".,?!。，？！")
     subtitle_blocks = []
     current_block = {"start": 0, "end": 0, "text": ""}
+    
+    # 计算容差后的最大字符数（软限制）
+    max_chars_tolerance = int(max_chars * 1.20)
+
+    # 一个辅助函数，用于将当前行添加到最终列表并重置
+    def finalize_and_reset_block():
+        nonlocal current_block
+        if current_block["text"]:
+            subtitle_blocks.append(current_block)
+        current_block = {"start": 0, "end": 0, "text": ""}
 
     for segment in segments:
-        
         if not segment.words:
             continue
 
         for word in segment.words:
-            #print(word)
-            # 检查直接添加新单词后（不加额外空格）是否会超过长度限制
-            # 我们直接使用 word.word 的长度，因为模型可能已包含前导空格
-            if len(current_block["text"]) + len(word.word) > max_chars and current_block["text"]:
-                # 如果超过限制，则保存当前块
-                subtitle_blocks.append(current_block)
-                # 开始新块。使用 lstrip() 清除第一个单词可能的前导空格，
-                # 避免字幕行以空格开头。
-                current_block = {"start": word.start, "end": word.end, "text": word.word.lstrip()}
-            else:
-                # 否则，将单词添加到当前块
-                if not current_block["text"]:
-                    # 这是新块的第一个单词
-                    current_block["start"] = word.start
-                    # 同样，使用 lstrip() 清除第一个单词的前导空格
-                    current_block["text"] = word.word.lstrip()
-                else:
-                    # 对于后续单词，直接拼接。
-                    # faster-whisper 会在需要时自带前导空格，我们直接使用即可。
-                    current_block["text"] += word.word
-                current_block["end"] = word.end
+            word_text = word.word
+            
+            # 如果当前行为空，直接开始新行
+            if not current_block["text"]:
+                current_block = {"start": word.start, "end": word.end, "text": word_text.lstrip()}
+                continue
 
-    # 添加最后一个字幕块（如果存在）
-    if current_block["text"]:
-        subtitle_blocks.append(current_block)
+            # --- 开始智能判断逻辑 ---
+            potential_len = len(current_block["text"]) + len(word_text)
+            # 判断新加的词是否以标点结尾
+            word_ends_clause = word_text.strip().endswith(END_OF_CLAUSE_CHARS)
+
+            # 情况一：新行长度在硬限制内
+            if potential_len <= max_chars:
+                current_block["text"] += word_text
+                current_block["end"] = word.end
+                # 如果这是一个自然断点，则立即结束这一行（提前换行）
+                if word_ends_clause:
+                    finalize_and_reset_block()
+
+            # 情况二：新行长度在容差区域内
+            elif potential_len <= max_chars_tolerance:
+                # 只有当这个词能构成一个完整子句时，才值得“拉伸”
+                if word_ends_clause:
+                    current_block["text"] += word_text
+                    current_block["end"] = word.end
+                    finalize_and_reset_block()
+                # 否则，不拉伸。结束当前行，用新词开始下一行
+                else:
+                    finalize_and_reset_block()
+                    current_block = {"start": word.start, "end": word.end, "text": word_text.lstrip()}
+            
+            # 情况三：新行长度超出容差
+            else:
+                # 必须换行。结束当前行，用新词开始下一行
+                finalize_and_reset_block()
+                current_block = {"start": word.start, "end": word.end, "text": word_text.lstrip()}
+
+    # 循环结束后，不要忘记添加最后剩余的行
+    finalize_and_reset_block()
 
     return subtitle_blocks
 
@@ -536,6 +564,21 @@ def _progress_reporter(
     if progress < 100.0:        
         callback(100.0)
 
+def _remove_gaps_between_blocks(blocks: List[Dict]) -> List[Dict]:
+    """
+    (最终修正版)
+    通过将前一个字幕块的结束时间延长到后一个字幕块的开始时间，来消除间隙。
+    """
+    if len(blocks) < 2:
+        return blocks
+    
+    # 遍历到倒数第二个元素，因为最后一个元素的结束时间不需要改变
+    for i in range(len(blocks) - 1):
+        # 将当前字幕块的结束时间，设置为下一个字幕块的开始时间
+        blocks[i]["end"] = blocks[i+1]["start"]
+        
+    return blocks
+
 def generate_srt(
     input_audio: str,
     model_name: str = "base",
@@ -547,7 +590,8 @@ def generate_srt(
     hotwords: Optional[str] = None,  
     verbose: bool = True,
     progress_callback: Optional[callable] = None,
-    vad_filter: bool = False
+    vad_filter: bool = False,
+    remove_gaps: bool = False  # <-- ADD NEW PARAMETER
 ) -> Optional[str]:
     """
     使用 faster-whisper 转录音频，并生成具有字级时间戳和长度限制的 SRT 字幕文件。
@@ -557,10 +601,12 @@ def generate_srt(
     local_model_path = os.path.join(SCRIPT_PATH, "model", model_name)
     try:
         if verbose:
+            show_dynamic_message(f"Loading the model '{model_name}'...", f"正在加载模型 '{model_name}'...")
             print(f"正在加载 faster-whisper 模型 '{model_name}'...")
         model = faster_whisper.WhisperModel(local_model_path)
         pipeline = faster_whisper.BatchedInferencePipeline(model=model)
         if verbose:
+            show_dynamic_message(f"Model '{model_name}' loaded successfully.", f"模型 '{model_name}' 加载成功。")
             print(f"模型 '{model_name}' 加载成功。")
     except Exception as e:
         show_dynamic_message(f"Model '{model_name}' is unavailable", f"模型'{model_name}'不可用")
@@ -578,9 +624,11 @@ def generate_srt(
     if language:
         transcribe_args["language"] = language
     if verbose:
+        show_dynamic_message(f"[Whisper] Starting ...", f"[Whisper] 开始...")
         print(f"[Whisper] 开始转录：{input_audio}")
         print(transcribe_args)
     segments_gen, info = pipeline.transcribe(input_audio, **transcribe_args)
+    show_dynamic_message(f"[Whisper] Language:{info.language}", f"[Whisper] 语言:{info.language}")
     print(info.language)
     # --- 3. 进度回调包装 ---
     if progress_callback:
@@ -590,6 +638,11 @@ def generate_srt(
     if info.language in ['zh', 'ja', 'th', 'lo', 'km', 'my', 'bo']:
         max_chars = max_chars / 2
     subtitle_blocks = _split_segments_by_max_chars(segments_gen, max_chars)
+    # --- NEW: Post-processing to remove gaps if requested ---
+    if remove_gaps:
+        print("Removing gaps between subtitle blocks...")
+        subtitle_blocks = _remove_gaps_between_blocks(subtitle_blocks)
+
     import re
     for blk in subtitle_blocks:
         # (?<=...)\s+(?=...) 仅匹配两汉字之间的空格
@@ -612,12 +665,23 @@ def generate_srt(
     return srt_path
 
 def on_create_clicked(ev):
+    resolve, current_project, _, _, current_timeline, _ = connect_resolve()
+    if not current_timeline:
+        show_dynamic_message("No active timeline.", "没有激活的时间线。")
+        return
+        
+    timeline_name = current_timeline.GetName()
     
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%m%d%H%M")
+    # Define a consistent file prefix for the timeline's audio
+    safe_name = timeline_name.replace(" ", "_")
+    audio_file_prefix = f"{safe_name}_audio_temp"
+
     model_name = items["ModelCombo"].CurrentText
     max_chars  = items["MaxChars"].Value
     display_name = items["LangCombo"].CurrentText
+
+    no_gaps_enabled = items["NoGapCheckBox"].Checked # <-- GET CHECKBOX STATE
+
     import re
     raw_hotwords = items["Hotwords"].PlainText or ""
     hotwords_list = [
@@ -625,7 +689,6 @@ def on_create_clicked(ev):
         for ph in re.split(r"[，,、；;]\s*|\s+", raw_hotwords)
         if ph.strip()
     ]
-    # 合并为字符串，faster-whisper 接口期望单个字符串
     hotwords_str = ",".join(hotwords_list) if hotwords_list else None
 
     def update_transcribe_progress(progress):
@@ -634,13 +697,48 @@ def on_create_clicked(ev):
         show_dynamic_message(en, zh)
     
     try:
-        show_dynamic_message("Rendering audio...","音频处理... ")
-        audio_path = render_timeline_audio(output_dir=AUDIO_TEMP_DIR)
-        filename = f"{timestamp}_{RAND_CODE}.srt"
+        # --- START: New Caching Logic ---
+        show_dynamic_message("Checking for cached audio...", "检查音频缓存...")
+        print(f"Checking for existing audio file with prefix '{audio_file_prefix}' in '{AUDIO_TEMP_DIR}'...")
+        
+        # 1. Check if the audio file has already been rendered
+        audio_path = find_rendered_file(AUDIO_TEMP_DIR, audio_file_prefix)
 
+        # 2. If not found, render it now
+        if not audio_path:
+            print("Cached audio not found. Starting new render.")
+            show_dynamic_message("Rendering audio...", "音频处理中...")
+            audio_path = render_timeline_audio(
+                output_dir=AUDIO_TEMP_DIR,
+                custom_name=audio_file_prefix
+            )
+        else:
+            print(f"Found cached audio: {audio_path}. Skipping render.")
+        # --- END: New Caching Logic ---
+
+        # Determine the output SRT filename
+        pattern = os.path.join(SUB_TEMP_DIR, f"{timeline_name}_subtitle_*.srt")
+        existing_files = glob.glob(pattern)
+        
+        indices = []
+        for path in existing_files:
+            # 从完整路径中提取不带扩展名的文件名 (例如: "MyTimeline_subtitle_1")
+            base = os.path.splitext(os.path.basename(path))[0]
+            # 按下划线分割
+            parts = base.split('_')
+            # 获取最后一部分
+            idx_str = parts[-1]
+            # 检查这部分是否为纯数字
+            if idx_str.isdigit():
+                indices.append(int(idx_str))
+
+        # 如果找到索引，则取最大值加1，否则从1开始
+        next_idx = max(indices) + 1 if indices else 1
+        filename = f"{timeline_name}_subtitle_{RAND_CODE}_{next_idx}"
+
+        # 3. Proceed with transcription if the audio path is valid
         if audio_path:
-            show_dynamic_message("Transcribing... 0.0% ","转录中... 0.0% ")
-
+            show_dynamic_message("Transcribing... 0.0%", "转录中... 0.0%")
             resolve.OpenPage("edit")
             srt_path = generate_srt(
                 input_audio=audio_path,
@@ -649,22 +747,24 @@ def on_create_clicked(ev):
                 output_dir=SUB_TEMP_DIR,
                 max_chars=max_chars,
                 batch_size=4,
-                hotwords = hotwords_str,
+                hotwords=hotwords_str,
                 output_filename=filename,
                 vad_filter=True,
-                progress_callback=update_transcribe_progress
+                progress_callback=update_transcribe_progress,
+                remove_gaps=no_gaps_enabled,
             )
             
             if srt_path:
                 import_srt_to_first_empty(srt_path)
-                show_dynamic_message("Finished! 100% ","转录完成！")
+                show_dynamic_message("Finished! 100%", "转录完成！")
             else:
-                ...
-                #show_dynamic_message("Failed to generate SRT. ","转录失败！")
+                # The generate_srt function already shows a model loading error if needed
+                print("Failed to generate SRT.")
         else:
-            show_dynamic_message("Failed to render audio. ","渲染失败！")
+            show_dynamic_message("Failed to get audio file.", "获取音频文件失败。")
+            
     except Exception as e:
-        show_dynamic_message(f"Error: {e} ",f"错误: {e} ")
+        show_dynamic_message(f"Error: {e}", f"错误: {e}")
         print(f"An error occurred: {e}")
         
 win.On.CreateButton.Clicked = on_create_clicked
