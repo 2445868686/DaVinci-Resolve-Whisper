@@ -1,9 +1,9 @@
 SCRIPT_NAME    = "DaVinci Whisper"
-SCRIPT_VERSION = " 1.0"
+SCRIPT_VERSION = " 1.0" # Updated version
 SCRIPT_AUTHOR  = "HEIBA"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-WINDOW_WIDTH, WINDOW_HEIGHT = 300, 350
+WINDOW_WIDTH, WINDOW_HEIGHT = 300, 400
 X_CENTER = (SCREEN_WIDTH  - WINDOW_WIDTH ) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
@@ -41,7 +41,9 @@ import string
 import shutil
 import glob
 import re
-from typing import Optional, List, Generator, Dict, Callable
+import requests # Added for OpenAI API
+from difflib import SequenceMatcher
+from typing import Optional, List, Generator, Dict
 from abc import ABC, abstractmethod
 
 SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -95,6 +97,7 @@ except ImportError:
     print("DaVinciResolveScript from DaVinci")
 
 def connect_resolve():
+    resolve = GetResolve()
     project_manager = resolve.GetProjectManager()
     project = project_manager.GetCurrentProject()
     media_pool = project.GetMediaPool()
@@ -146,16 +149,23 @@ class TranscriptionProvider(ABC):
         or None on failure.
         """
         pass
+    
+    def _format_time(self, seconds: float) -> str:
+        milliseconds = int((seconds % 1) * 1000)
+        return time.strftime('%H:%M:%S', time.gmtime(seconds)) + f',{milliseconds:03d}'
+    
+    def _write_srt(self, srt_path: str, subtitle_blocks: List[Dict]):
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for idx, blk in enumerate(subtitle_blocks, 1):
+                f.write(f"{idx}\n")
+                f.write(f"{self._format_time(blk['start'])} --> {self._format_time(blk['end'])}\n")
+                f.write(f"{blk['text'].strip()}\n\n")
 
 class FasterWhisperProvider(TranscriptionProvider):
     """Transcription provider using the faster-whisper library."""
 
     def get_available_models(self) -> List[str]:
         return ["tiny", "small", "base", "medium", "large-v3"]
-
-    def _format_time(self, seconds: float) -> str:
-        milliseconds = int((seconds % 1) * 1000)
-        return time.strftime('%H:%M:%S', time.gmtime(seconds)) + f',{milliseconds:03d}'
 
     def _split_segments_by_max_chars(self, segments: Generator, max_chars: int) -> List[Dict]:
         END_OF_CLAUSE_CHARS = tuple(".,?!。，？！")
@@ -170,9 +180,11 @@ class FasterWhisperProvider(TranscriptionProvider):
             current_block = {"start": 0, "end": 0, "text": ""}
 
         for segment in segments:
+            print(segment)
             if not segment.words:
                 continue
             for word in segment.words:
+                print(word)
                 word_text = word.word
                 if not current_block["text"]:
                     current_block = {"start": word.start, "end": word.end, "text": word_text.lstrip()}
@@ -225,7 +237,7 @@ class FasterWhisperProvider(TranscriptionProvider):
         for i in range(len(blocks) - 1):
             blocks[i]["end"] = blocks[i+1]["start"]
         return blocks
-
+    
     def transcribe(self, **kwargs) -> Optional[str]:
         input_audio = kwargs.get("input_audio")
         model_name = kwargs.get("model_name", "base")
@@ -254,10 +266,9 @@ class FasterWhisperProvider(TranscriptionProvider):
             return None
 
         transcribe_args = {"beam_size": 5, "log_progress": True, "batch_size": batch_size, "word_timestamps": True, "hotwords": hotwords, "vad_filter": vad_filter}
-        print(transcribe_args)
         if language:
             transcribe_args["language"] = language
-        
+        print(transcribe_args)
         if verbose: 
             show_dynamic_message("[Whisper] Starting...", "[Whisper] 开始...")
         segments_gen, info = pipeline.transcribe(input_audio, **transcribe_args)
@@ -269,6 +280,7 @@ class FasterWhisperProvider(TranscriptionProvider):
         
         if info.language in ['zh', 'ja', 'th', 'lo', 'km', 'my', 'bo']:
             max_chars = max_chars / 2
+        
         subtitle_blocks = self._split_segments_by_max_chars(segments_gen, int(max_chars))
         
         if remove_gaps:
@@ -283,19 +295,289 @@ class FasterWhisperProvider(TranscriptionProvider):
         os.makedirs(output_dir, exist_ok=True)
         srt_path = os.path.join(output_dir, f"{output_filename}.srt")
 
-        with open(srt_path, "w", encoding="utf-8") as f:
-            for idx, blk in enumerate(subtitle_blocks, 1):
-                f.write(f"{idx}\n")
-                f.write(f"{self._format_time(blk['start'])} --> {self._format_time(blk['end'])}\n")
-                f.write(f"{blk['text'].strip()}\n\n")
+        self._write_srt(srt_path, subtitle_blocks)
 
         if verbose: print(f"[Whisper] Generated SRT: {srt_path}")
         return srt_path
 
+class OpenAIProvider(TranscriptionProvider):
+    """
+    Transcription provider using the OpenAI API, with robust subtitle generation.
+    """
+    CJK_LANGS = {
+        'zh','chinese',
+        'ja','japanese',
+        'th','thai',
+        'lo','lao',
+        'km','khmer',
+        'my','burmese','myanmar',
+        'bo','tibetan',
+    }
+
+    # 2) name ➜ ISO 映射
+    LANG_ALIAS = {
+        'chinese': 'zh', 'japanese': 'ja', 'thai': 'th',
+        'lao': 'lo', 'khmer': 'km',
+        'burmese': 'my', 'myanmar': 'my',
+        'tibetan': 'bo',
+    }
+    def get_available_models(self) -> List[str]:
+        return ["whisper-1","gpt-4o-transcribe","gpt-4o-mini-transcribe"]
+
+    def _format_srt_time(self, seconds: float) -> str:
+        """Formats seconds into SRT time format HH:MM:SS,ms"""
+        millis = int(seconds * 1000)
+        hours = millis // 3600000
+        millis %= 3600000
+        minutes = millis // 60000
+        millis %= 60000
+        seconds = millis // 1000
+        millis %= 1000
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+    def _write_srt(self, file_path: str, blocks: List[Dict]):
+        """Writes a list of subtitle blocks to an SRT file."""
+        with open(file_path, 'w', encoding='utf-8') as f:
+            for i, block in enumerate(blocks):
+                f.write(str(i + 1) + '\n')
+                start_time = self._format_srt_time(block['start'])
+                end_time = self._format_srt_time(block['end'])
+                f.write(f"{start_time} --> {end_time}\n")
+                f.write(block['text'].strip() + '\n\n')
+
+    def _align_punctuations(self, words: List[Dict], text: str, language: str) -> List[Dict]:
+        """
+        将 text 中的标点优雅地归并回 words。
+        对 CJK 语言使用字级指针算法；其他语言沿用 SequenceMatcher。
+        """
+        if not words or not text:
+            return words
+
+        # ---------- 新的 CJK 逻辑 ----------
+        if language in self.CJK_LANGS:
+            # 1) 去掉 text 中的空白字符，保持与 words 顺序一致
+            plain_text = re.sub(r"\s+", "", text)
+
+            # 2) 双指针同步
+            new_words = []
+            p_text = 0
+            len_text = len(plain_text)
+
+            for w in words:
+                ch = w["word"]
+                # 向前滑动直到找到同一字符
+                while p_text < len_text and plain_text[p_text] != ch:
+                    p_text += 1
+                if p_text >= len_text:
+                    # 对齐失败，直接回退
+                    return words
+                p_text += 1  # 越过当前匹配字符
+
+                # 3) 向后累加所有紧随其后的标点
+                punct = []
+                while p_text < len_text and plain_text[p_text] in "。，？！…,.!?;；":
+                    punct.append(plain_text[p_text])
+                    p_text += 1
+
+                # 4) 构造新 word
+                new_word = w.copy()
+                new_word["word"] = ch + "".join(punct)
+                new_words.append(new_word)
+
+            return new_words
+
+        # ---------- 英语及其他语言：保留你的原实现 ----------
+        api_word_list = [w['word'].strip().lower() for w in words]
+        original_text_tokens = re.findall(r"[\w'-]+|[.,!?;]", text)
+        text_word_list = [w.lower() for w in original_text_tokens]
+
+        matcher = SequenceMatcher(None, api_word_list, text_word_list, autojunk=False)
+        new_words = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                for i in range(i1, i2):
+                    j = j1 + (i - i1)
+                    new_word = words[i].copy()
+                    new_word['word'] = original_text_tokens[j]
+                    new_words.append(new_word)
+            elif tag in ('replace', 'delete'):
+                if i1 < i2:
+                    combined = " ".join(original_text_tokens[j1:j2]).strip()
+                    if combined:
+                        new_words.append({
+                            'word': combined,
+                            'start': words[i1]['start'],
+                            'end'  : words[i2-1]['end']
+                        })
+            elif tag == 'insert' and new_words:
+                new_words[-1]['word'] += "".join(original_text_tokens[j1:j2])
+        return new_words
+    def _split_words_into_blocks(self, words: List[Dict], max_chars: int, language: str) -> List[Dict]:
+        END_OF_CLAUSE_CHARS = tuple(".,?!。，？！")
+        separator = "" if language in self.CJK_LANGS else " "
+        subtitle_blocks = []
+        current_block = {"start": 0, "end": 0, "text": ""}
+        max_chars_tolerance = int(max_chars * 1.20)
+
+        def finalize_and_reset_block():
+            nonlocal current_block
+            if current_block["text"]:
+                current_block["text"] = current_block["text"].strip()
+                subtitle_blocks.append(current_block)
+            current_block = {"start": 0, "end": 0, "text": ""}
+
+        for word in words:
+            word_text = word["word"].strip()
+            if not word_text:
+                continue
+
+            if not current_block["text"]:
+                current_block = {"start": word["start"], "end": word["end"], "text": word_text}
+                continue
+
+            # Use language-aware separator
+            potential_text = current_block["text"] + separator + word_text
+            potential_len = len(potential_text)
+            word_ends_clause = any(word_text.endswith(c) for c in END_OF_CLAUSE_CHARS)
+
+            if potential_len <= max_chars:
+                current_block["text"] = potential_text
+                current_block["end"] = word["end"]
+                if word_ends_clause:
+                    finalize_and_reset_block()
+            elif potential_len <= max_chars_tolerance and word_ends_clause:
+                current_block["text"] = potential_text
+                current_block["end"] = word["end"]
+                finalize_and_reset_block()
+            else:
+                finalize_and_reset_block()
+                current_block = {"start": word["start"], "end": word["end"], "text": word_text}
+        
+        finalize_and_reset_block()
+        return subtitle_blocks
+
+    def _remove_gaps_between_blocks(self, blocks: List[Dict]) -> List[Dict]:
+        """Ensures there is no time gap between consecutive subtitle blocks."""
+        if len(blocks) < 2:
+            return blocks
+        for i in range(len(blocks) - 1):
+            blocks[i]["end"] = blocks[i+1]["start"]
+        return blocks
+    
+    def transcribe(self, **kwargs) -> Optional[str]:
+        # Get arguments with fallbacks
+        api_key = kwargs.get("api_key","sk-wLP8n2FczZrYukonSvbozSba4HyV4cBHstEPDACv8aeI6QFH")
+        base_url = kwargs.get("base_url", "https://yunwu.ai/").rstrip('/')
+        input_audio = kwargs.get("input_audio")
+        language = kwargs.get("language")
+        model_name = kwargs.get("model_name", "base")
+        output_dir = kwargs.get("output_dir", ".")
+        output_filename = kwargs.get("output_filename")
+        max_chars = kwargs.get("max_chars", 40)
+        hotwords = kwargs.get("hotwords")
+        progress_callback = kwargs.get("progress_callback")
+        remove_gaps = kwargs.get("remove_gaps", False)
+
+        if not api_key:
+            show_dynamic_message("OpenAI API Key not found.", "未找到 OpenAI API 密钥。")
+            print("Error: OpenAI API Key not provided.")
+            return None
+
+        headers = {"Authorization": f"Bearer {api_key}"}
+        url = f"{base_url}/v1/audio/transcriptions"
+        
+        files = {'file': (os.path.basename(input_audio), open(input_audio, 'rb'), 'audio/mpeg')}
+        data = {
+            "model": model_name,
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "word",
+        }
+        
+        if language: data["language"] = language
+        if hotwords: data["prompt"] = hotwords
+
+        if progress_callback: progress_callback(10.0)
+        def safe_post(url, headers, files, data, retries=3):
+            for i in range(retries):
+                try:
+                    # connect timeout 10 s，首包后 read timeout 60 s
+                    return requests.post(url, headers=headers, files=files, data=data,
+                                        timeout=(10, 60))
+                except (requests.exceptions.ConnectTimeout,
+                        requests.exceptions.ReadTimeout,
+                        requests.exceptions.ConnectionError) as e:
+                    print(f"[Attempt {i+1}] {e}")
+                    if i == retries - 1:
+                        raise
+                    time.sleep(2 ** i)  # 递增回退
+        try:
+            print(data)
+            show_dynamic_message(f"Calling API: {url}...", f"调用接口: {url}...")
+
+            response = safe_post(url, headers, files, data)
+
+            response.raise_for_status()
+            result = response.json()
+            print(result)
+            
+            if progress_callback: progress_callback(50.0)
+
+            detected_language = result.get('language', 'en')
+            detected_language = self.LANG_ALIAS.get(detected_language, detected_language)
+            if detected_language in self.CJK_LANGS:
+                max_chars = int(max_chars / 2)
+
+            # --- THIS IS THE CORRECTED LOGIC BLOCK ---
+            original_words = result.get('words', [])
+            full_text = result.get('text', '')
+            
+
+            words_to_split = self._align_punctuations(original_words, full_text, detected_language)
+
+            subtitle_blocks = self._split_words_into_blocks(words_to_split, int(max_chars), detected_language)
+            print(subtitle_blocks)
+            # --- END OF THE FINAL FIX ---
+            # --- END OF CORRECTION ---
+            
+            if remove_gaps:
+                subtitle_blocks = self._remove_gaps_between_blocks(subtitle_blocks)
+            
+            for blk in subtitle_blocks:
+                blk["text"] = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", blk["text"])
+
+            if not output_filename:
+                base = os.path.splitext(os.path.basename(input_audio))[0]
+                output_filename = f"{base}_openai"
+                
+            os.makedirs(output_dir, exist_ok=True)
+            srt_path = os.path.join(output_dir, f"{output_filename}.srt")
+            self._write_srt(srt_path, subtitle_blocks)
+
+            if progress_callback: progress_callback(100.0)
+            print(f"[OpenAI] Generated SRT: {srt_path}")
+            return srt_path
+
+        except requests.exceptions.RequestException as e:
+            error_message = str(e)
+            try:
+                if e.response is not None:
+                    error_details = e.response.json()
+                    if 'error' in error_details and 'message' in error_details['error']:
+                        error_message = error_details['error']['message']
+            except (AttributeError, ValueError, KeyError):
+                 pass
+            
+            show_dynamic_message(f"API Error: {error_message}", f"API 错误: {error_message}")
+            print(f"OpenAI API request failed: {error_message}")
+            return None
+        finally:
+            if 'file' in files and files['file'][1]:
+                files['file'][1].close()
 # ================== UI Definition and Logic ==================
 
-# Instantiate the desired transcription provider
+# Instantiate the transcription providers
 faster_whisper_provider = FasterWhisperProvider()
+openai_provider = OpenAIProvider()
 
 win = dispatcher.AddWindow(
     {
@@ -309,10 +591,17 @@ win = dispatcher.AddWindow(
         ui.VGroup([
             ui.VGroup({"Weight":1},[
                 ui.Label({"ID":"TitleLabel","Text":"Create subtitles from audio","Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
+                
                 ui.HGroup({"Weight":0.1},[
                     ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.1}),
                     ui.ComboBox({"ID":"ModelCombo","Weight":0.1}),
+                    
                 ]),
+                ui.HGroup({"Weight":0.1},[
+                    ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
+                    ui.CheckBox({"ID":"OpenAICheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
+                ]),
+                
                 ui.HGroup({"Weight":0.1},[
                     ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.1}),
                     ui.ComboBox({"ID":"LangCombo","Weight":0.1}),
@@ -324,7 +613,7 @@ win = dispatcher.AddWindow(
                 ]),
                 ui.CheckBox({"ID":"NoGapCheckBox", "Text":"No Gaps Between Subtitles", "Checked":False, "Weight":0}),
                 ui.Button({"ID":"CreateButton","Text":"Create","Weight":0.15}),
-                ui.Label({"ID":"HotwordsLabel","Text":"Phrases","Weight":0.1}),
+                ui.Label({"ID":"HotwordsLabel","Text":"Phrases / Prompt","Weight":0.1}),
                 ui.TextEdit({"ID":"Hotwords","Text":"","Weight":0.1}),
                 ui.HGroup({"Weight":0.1},[
                     ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
@@ -377,17 +666,19 @@ translations = {
         "LangLabel":"语言", 
         "ModelLabel":"模型", 
         "CreateButton":"创建", 
-        "HotwordsLabel":"短语列表", 
+        "HotwordsLabel":"短语列表 / 提示", 
         "MaxCharsLabel":"每行最大字符", 
-        "NoGapCheckBox":"字幕之间无间隙"},
+        "NoGapCheckBox":"字幕之间无间隙",
+        "OpenAICheckBox": "使用 OpenAI API"},
     "en": {
         "TitleLabel":"Create subtitles from audio", 
         "LangLabel":"Language", 
         "ModelLabel":"Model", 
         "CreateButton":"Create", 
-        "HotwordsLabel":"Phrases", 
+        "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
-        "NoGapCheckBox":"No Gaps Between Subtitles"}
+        "NoGapCheckBox":"No Gaps Between Subtitles",
+        "OpenAICheckBox": "Use OpenAI API"}
 }
 
 items = win.GetItems()
@@ -396,9 +687,16 @@ msg_items = msgbox.GetItems()
 for lang_display_name in LANGUAGE_MAP.keys():
     items["LangCombo"].AddItem(lang_display_name)
 
-# Populate models from the provider
-for model in faster_whisper_provider.get_available_models():
-    items["ModelCombo"].AddItem(model)
+def populate_models(use_openai):
+    provider = openai_provider if use_openai else faster_whisper_provider
+    items["ModelCombo"].Clear()
+    for model in provider.get_available_models():
+        items["ModelCombo"].AddItem(model)
+
+def on_provider_switch(ev):
+    populate_models(items["OpenAICheckBox"].Checked)
+win.On.OpenAICheckBox.Clicked = on_provider_switch
+populate_models(False) # Initial population
 
 def switch_language(lang):
     for item_id, text_value in translations[lang].items():
@@ -440,6 +738,7 @@ def import_srt_to_first_empty(path):
         if folder.GetName() == "srt":
             srt_folder = folder
             break
+
     if srt_folder is None:
         srt_folder = current_media_pool.AddSubFolder(current_root_folder, "srt")
 
@@ -448,7 +747,8 @@ def import_srt_to_first_empty(path):
     current_media_pool.ImportMedia([path])
 
     clips = srt_folder.GetClipList()
-    latest_clip = clips[-1]  
+    latest_clip = clips[-1] 
+
     current_media_pool.AppendToTimeline([latest_clip])
 
     print("🎉 The subtitles were inserted into folder 'srt' and track #", target)
@@ -467,8 +767,14 @@ def load_audio_only_preset(project, keyword="audio only"):
 def render_timeline_audio(output_dir: str, custom_name: str) -> Optional[str]:
     resolve, project, _, _, timeline, _ = connect_resolve()
     if not project or not timeline: return None
-    
-    load_audio_only_preset(project)
+    render_preset = "render_to_mp3"
+    #render_preset = "Audio Only"
+    resolve.ImportRenderPreset(os.path.join(SCRIPT_PATH, "render_preset", f"{render_preset}.xml"))
+    project.LoadRenderPreset(render_preset)
+
+    # ② 强制指定想要的格式/编码器（可选，但最稳妥）
+    #project.SetCurrentRenderFormatAndCodec("MP3", "Linear PCM")   # 或 ("MP4","aac")
+    #load_audio_only_preset(project)
     os.makedirs(output_dir, exist_ok=True)
     render_settings = {
         "SelectAllFrames": True, 
@@ -477,7 +783,7 @@ def render_timeline_audio(output_dir: str, custom_name: str) -> Optional[str]:
         "TargetDir": output_dir, 
         "CustomName": custom_name,
         "AudioSampleRate": 48000, 
-        "AudioCodec": "LinearPCM", 
+        "AudioCodec": "mp3", 
         "AudioBitDepth": 16,
     }
     project.SetRenderSettings(render_settings)
@@ -493,9 +799,8 @@ def render_timeline_audio(output_dir: str, custom_name: str) -> Optional[str]:
     while project.IsRenderingInProgress():
         print("Rendering...")
         time.sleep(2)
-        
     print("Render complete!")
-    return os.path.join(output_dir, f"{custom_name}.wav")
+    return os.path.join(output_dir, f"{custom_name}.mp3")
 
 def on_create_clicked(ev):
     resolve, _, _, _, timeline, _ = connect_resolve()
@@ -506,7 +811,7 @@ def on_create_clicked(ev):
     timeline_name = timeline.GetName()
     safe_name = timeline_name.replace(" ", "_")
     audio_file_prefix = f"{safe_name}_audio_temp"
-    audio_path = os.path.join(AUDIO_TEMP_DIR, f"{audio_file_prefix}.wav")
+    audio_path = os.path.join(AUDIO_TEMP_DIR, f"{audio_file_prefix}.mp3")
     
     raw_hotwords = items["Hotwords"].PlainText or ""
     hotwords_list = [
@@ -539,25 +844,36 @@ def on_create_clicked(ev):
         show_dynamic_message("Transcribing... 0.0%", "转录中... 0.0%")
         resolve.OpenPage("edit")
         
-        srt_path = faster_whisper_provider.transcribe(
-            input_audio=audio_path,
-            model_name=items["ModelCombo"].CurrentText,
-            language=LANGUAGE_MAP.get(items["LangCombo"].CurrentText),
-            output_dir=SUB_TEMP_DIR,
-            output_filename=filename,
-            max_chars=items["MaxChars"].Value,
-            batch_size=4,
-            hotwords=",".join(hotwords_list) if hotwords_list else None,
-            vad_filter=True,
-            progress_callback=update_transcribe_progress,
-            remove_gaps=items["NoGapCheckBox"].Checked
-        )
+        # Determine which provider to use
+        use_openai = items["OpenAICheckBox"].Checked
+        provider = openai_provider if use_openai else faster_whisper_provider
+
+        transcribe_params = {
+            "input_audio": audio_path,
+            "model_name": items["ModelCombo"].CurrentText,
+            "language": LANGUAGE_MAP.get(items["LangCombo"].CurrentText),
+            "output_dir": SUB_TEMP_DIR,
+            "output_filename": filename,
+            "max_chars": items["MaxChars"].Value,
+            "hotwords": ",".join(hotwords_list) if hotwords_list else None,
+            "progress_callback": update_transcribe_progress,
+            "remove_gaps": items["NoGapCheckBox"].Checked
+        }
+        
+        # Add provider-specific parameters
+        if not use_openai:
+            transcribe_params.update({"batch_size": 4, "vad_filter": True})
+        
+        srt_path = provider.transcribe(**transcribe_params)
         
         if srt_path:
             import_srt_to_first_empty(srt_path)
             show_dynamic_message("Finished! 100%", "转录完成！")
         else:
-            print("Failed to generate SRT. Model loading might have failed.")
+            print("Failed to generate SRT. Provider might have failed.")
+            if not use_openai:
+                show_dynamic_message("Transcription Failed. Model may be missing.", "转录失败。可能缺少模型文件。")
+            # OpenAI provider shows its own specific error messages
             
     except Exception as e:
         show_dynamic_message(f"Error: {e}", f"错误: {e}")
