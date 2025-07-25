@@ -41,6 +41,7 @@ import string
 import shutil
 import glob
 import re
+import json
  # Added for OpenAI API
 from difflib import SequenceMatcher
 from typing import Optional, List, Generator, Dict
@@ -49,8 +50,21 @@ from abc import ABC, abstractmethod
 SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 AUDIO_TEMP_DIR = os.path.join(SCRIPT_PATH, "audio_temp")
 SUB_TEMP_DIR = os.path.join(SCRIPT_PATH, "sub_temp")
+SETTINGS = os.path.join(SCRIPT_PATH, "config", "settings.json")
 RAND_CODE = "".join(random.choices(string.digits, k=2))
+DEFAULT_SETTINGS = {
 
+    "OPENAI_FORMAT_BASE_URL": "",
+    "OPENAI_FORMAT_API_KEY": "",
+    "PROVIDER":False,
+    "MODEL": 0,
+    "LANGUAGE": 0,
+    "MAX_CHARS": 42,
+    "REMOVE_GAPS": False,
+    "SMART":False,
+    "CN":True,
+    "EN":False,
+}
 ui       = fusion.UIManager
 dispatcher = bmd.UIDispatcher(ui)
 loading_win = dispatcher.AddWindow(
@@ -183,14 +197,17 @@ class FasterWhisperProvider(TranscriptionProvider):
         # collapse 多空格
         text = re.sub(r"\s+", " ", text.strip())
 
-        # 在 CJK<->ASCII 数字/字母 交界处插入空格（若缺失）
-        text = re.sub(r"([\u4e00-\u9fff])([A-Za-z0-9])", r"\1 \2", text)
-        text = re.sub(r"([A-Za-z0-9])([\u4e00-\u9fff])", r"\1 \2", text)
+        PUNCTS = r"\.\,\?\!，。？！"
+        text = re.sub(fr"([\u4e00-\u9fff{PUNCTS}])([A-Za-z0-9])", r"\1 \2", text)
+        text = re.sub(fr"([A-Za-z0-9])([\u4e00-\u9fff])",         r"\1 \2", text)
 
         # -------- ② 分词：单个 CJK 字，或“空格+英文词”，或其他符号 --------
         token_pattern = re.compile(
-            r"(?:\s+[A-Za-z0-9][A-Za-z0-9'\-]*|[\u4e00-\u9fff]|[^\s])"
-        )
+            r"(?:\s+[A-Za-z0-9][A-Za-z0-9'\-]*"   # ① 空格 + 英文词
+            r"|[A-Za-z0-9][A-Za-z0-9'\-]*"        # ② 句首/标点后英文词
+            r"|[\u4e00-\u9fff]"                   # ③ 单个 CJK
+            r"|[^\s])" )                          # ④ 其它非空白符
+
         return token_pattern.findall(text)
 
     # ----------------- 2. _collect_words ------------------
@@ -254,6 +271,7 @@ class FasterWhisperProvider(TranscriptionProvider):
                 for t in aligned]
         )
         yield fake_segment
+
     def _split_segments_by_max_chars(self, segments: Generator, max_chars: int) -> List[Dict]:
         END_OF_CLAUSE_CHARS = tuple(".,?!。，？！")
         subtitle_blocks = []
@@ -420,7 +438,7 @@ class FasterWhisperProvider(TranscriptionProvider):
         if progress_callback:
             segments_gen = self._progress_reporter(segments_gen, info.duration, progress_callback)
         if items["SmartCheckBox"].Checked:
-            show_dynamic_message(f"[Whisper] 请稍等...", f"[Whisper] 智能优化会占用更多时间")
+            show_dynamic_message(f"[Whisper] Smart optimization takes up more time...", f"[Whisper] 智能优化会占用更多时间...")
             text = self._transcribe_audio(
                 file_path=input_audio,
                 api_key = kwargs.get("api_key",""),
@@ -429,8 +447,9 @@ class FasterWhisperProvider(TranscriptionProvider):
                 hotwords=None,
             )
             gpt_tokens     = self._normalize_text(text, info.language)
-            #print(gpt_tokens)
+            print(gpt_tokens)
             whisper_tokens = self._collect_words(segments_gen)
+            print(whisper_tokens)
             segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
         else:
             segments_to_split = segments_gen
@@ -757,7 +776,7 @@ win = dispatcher.AddWindow(
                 ui.HGroup({"Weight":0.1},[
                     #ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
                     ui.CheckBox({"ID":"SmartCheckBox", "Text":"Smarter (beta)", "Checked":False, "Weight":0}),
-                    ui.CheckBox({"ID":"OpenAICheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
+                    ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
                 ]),
                 
                 ui.HGroup({"Weight":0.1},[
@@ -810,7 +829,7 @@ openai_config_window = dispatcher.AddWindow(
     {
         "ID": "OpenAIConfigWin",
         "WindowTitle": "OpenAI API",
-        "Geometry": [900, 400, 400, 200],
+        "Geometry": [900, 400, 350, 150],
         "Hidden": True,
         "StyleSheet": """
         * {
@@ -821,14 +840,14 @@ openai_config_window = dispatcher.AddWindow(
     [
         ui.VGroup(
             [
-                ui.Label({"ID": "OpenAILabel","Text": "填写OpenAI API信息", "Alignment": {"AlignHCenter": True, "AlignVCenter": True}}),
+                ui.Label({"ID": "OpenAIFormatLabel","Text": "填写OpenAI API信息", "Alignment": {"AlignHCenter": True, "AlignVCenter": True}}),
                 ui.HGroup({"Weight": 1}, [
-                    ui.Label({"ID": "OpenAIBaseURLLabel", "Text": "Base URL", "Alignment": {"AlignRight": False}, "Weight": 0.2}),
-                    ui.LineEdit({"ID": "OpenAIBaseURL", "Text":"","PlaceholderText": "https://api.openai.com", "Weight": 0.8}),
+                    ui.Label({"ID": "OpenAIFormatBaseURLLabel", "Text": "Base URL", "Alignment": {"AlignRight": False}, "Weight": 0.2}),
+                    ui.LineEdit({"ID": "OpenAIFormatBaseURL", "Text":"","PlaceholderText": "https://api.openai.com", "Weight": 0.8}),
                 ]),
                 ui.HGroup({"Weight": 1}, [
-                    ui.Label({"ID": "OpenAIApiKeyLabel", "Text": "密钥", "Alignment": {"AlignRight": False}, "Weight": 0.2}),
-                    ui.LineEdit({"ID": "OpenAIApiKey", "Text": "", "EchoMode": "Password", "Weight": 0.8}),
+                    ui.Label({"ID": "OpenAIFormatApiKeyLabel", "Text": "API Key", "Alignment": {"AlignRight": False}, "Weight": 0.2}),
+                    ui.LineEdit({"ID": "OpenAIFormatApiKey", "Text": "", "EchoMode": "Password", "Weight": 0.8}),
                     
                 ]),
                 ui.HGroup({"Weight": 1}, [
@@ -860,8 +879,11 @@ translations = {
         "HotwordsLabel":"短语列表 / 提示", 
         "MaxCharsLabel":"每行最大字符", 
         "NoGapCheckBox":"字幕之间无间隙",
-        "OpenAICheckBox": "使用 OpenAI API",
+        "OnlineCheckBox": "使用 OpenAI API",
         "SmartCheckBox": "智能修正 (beta)",
+        "OpenAIFormatLabel":"填写 OpenAI Format API 信息",
+        "OpenAIConfirm":"确定",
+        "OpenAIRegisterButton":"注册",
         },
     "en": {
         "TitleLabel":"Create subtitles from audio", 
@@ -871,8 +893,11 @@ translations = {
         "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
         "NoGapCheckBox":"No Gaps Between Subtitles",
-        "OpenAICheckBox": "Use OpenAI API",
+        "OnlineCheckBox": "Use OpenAI API",
         "SmartCheckBox": "Smarter (beta)",
+        "OpenAIFormatLabel":"OpenAI Format API",
+        "OpenAIConfirm":"Confirm",
+        "OpenAIRegisterButton":"Register",
         }
 }
 
@@ -888,6 +913,8 @@ def populate_models(use_openai):
     items["SmartCheckBox"].Checked = False
     if use_openai:
         openai_config_window.Show() 
+    else:
+        openai_config_window.Hide()
     items["ModelCombo"].Clear()
     for model in provider.get_available_models():
         items["ModelCombo"].AddItem(model)
@@ -895,17 +922,23 @@ def populate_models(use_openai):
 def on_show_openai(ev):
     if items["SmartCheckBox"].Checked:
         openai_config_window.Show()
+    else:
+        openai_config_window.Hide()
 win.On.SmartCheckBox.Clicked = on_show_openai
 
 def on_provider_switch(ev):
-    populate_models(items["OpenAICheckBox"].Checked)
-win.On.OpenAICheckBox.Clicked = on_provider_switch
+    populate_models(items["OnlineCheckBox"].Checked)
+win.On.OnlineCheckBox.Clicked = on_provider_switch
 populate_models(False) # Initial population
 
 def switch_language(lang):
     for item_id, text_value in translations[lang].items():
         if item_id in items:
             items[item_id].Text = text_value
+        elif item_id in openai_items:    
+            openai_items[item_id].Text = text_value
+        else:
+            print(f"[Warning] No control with ID {item_id} exists in items, so the text cannot be set!")
 
 def on_lang_checkbox_clicked(ev):
     is_en_checked = ev['sender'].ID == "LangEnCheckBox"
@@ -922,7 +955,36 @@ def on_openai_close(ev):
 openai_config_window.On.OpenAIConfirm.Clicked = on_openai_close
 openai_config_window.On.OpenAIConfigWin.Close = on_openai_close
 
+def load_settings(settings_file):
+    if os.path.exists(settings_file):
+        with open(settings_file, 'r') as file:
+            content = file.read()
+            if content:
+                try:
+                    settings = json.loads(content)
+                    return settings
+                except json.JSONDecodeError as err:
+                    print('Error decoding settings:', err)
+                    return None
+    return None
 
+saved_settings = load_settings(SETTINGS)
+
+if saved_settings:
+    openai_items["OpenAIFormatBaseURL"].Text = saved_settings.get("OPENAI_FORMAT_BASE_URL", DEFAULT_SETTINGS["OPENAI_FORMAT_BASE_URL"])
+    openai_items["OpenAIFormatApiKey"].Text = saved_settings.get("OPENAI_FORMAT_API_KEY", DEFAULT_SETTINGS["OPENAI_FORMAT_API_KEY"])
+    #items["OnlineCheckBox"].Checked = saved_settings.get("PROVIDER", DEFAULT_SETTINGS["PROVIDER"])
+    items["ModelCombo"].CurrentIndex = saved_settings.get("MODEL", DEFAULT_SETTINGS["MODEL"])
+    items["LangCombo"].CurrentIndex = saved_settings.get("LANGUAGE", DEFAULT_SETTINGS["LANGUAGE"])
+    items["MaxChars"].Value = saved_settings.get("MAX_CHARS", DEFAULT_SETTINGS["MAX_CHARS"])
+    items["NoGapCheckBox"].Checked = saved_settings.get("REMOVE_GAPS", DEFAULT_SETTINGS["REMOVE_GAPS"])
+    items["LangCnCheckBox"].Checked = saved_settings.get("CN", DEFAULT_SETTINGS["CN"])
+    items["LangEnCheckBox"].Checked = saved_settings.get("EN", DEFAULT_SETTINGS["EN"])
+    #items["SmartCheckBox"].Checked = saved_settings.get("SMART", DEFAULT_SETTINGS["SMART"])
+if items["LangEnCheckBox"].Checked :
+    switch_language("en")
+else:
+    switch_language("cn")
 def import_srt_to_first_empty(path):
     resolve, current_project, current_media_pool, current_root_folder, current_timeline, fps = connect_resolve()
     if not current_timeline:
@@ -958,6 +1020,7 @@ def import_srt_to_first_empty(path):
     current_media_pool.ImportMedia([path])
 
     clips = srt_folder.GetClipList()
+
     latest_clip = clips[-1] 
 
     current_media_pool.AppendToTimeline([latest_clip])
@@ -1056,13 +1119,13 @@ def on_create_clicked(ev):
         resolve.OpenPage("edit")
         
         # Determine which provider to use
-        use_openai = items["OpenAICheckBox"].Checked
+        use_openai = items["OnlineCheckBox"].Checked
         provider = openai_provider if use_openai else faster_whisper_provider
 
         transcribe_params = {
             "input_audio": audio_path,
-            "base_url":openai_items["OpenAIBaseURL"].Text,
-            "api_key":openai_items["OpenAIApiKey"].Text,
+            "base_url":openai_items["OpenAIFormatBaseURL"].Text,
+            "api_key":openai_items["OpenAIFormatApiKey"].Text,
             "model_name": items["ModelCombo"].CurrentText,
             "language": LANGUAGE_MAP.get(items["LangCombo"].CurrentText),
             "output_dir": SUB_TEMP_DIR,
@@ -1099,6 +1162,30 @@ def on_open_link_button_clicked(ev):
     webbrowser.open(url)
 win.On.CopyrightButton.Clicked = on_open_link_button_clicked
 
+def save_file():
+    settings = {
+        "OPENAI_FORMAT_BASE_URL": openai_items["OpenAIFormatBaseURL"].Text,
+        "OPENAI_FORMAT_API_KEY": openai_items["OpenAIFormatApiKey"].Text,
+        "PROVIDER":items["OnlineCheckBox"].Checked,
+        "MODEL": items["ModelCombo"].CurrentIndex,
+        "LANGUAGE": items["LangCombo"].CurrentIndex,
+        "MAX_CHARS": items["MaxChars"].Value,
+        "SMART":items["SmartCheckBox"].Checked,
+        "REMOVE_GAPS": items["NoGapCheckBox"].Checked,
+        "CN":items["LangCnCheckBox"].Checked,
+        "EN":items["LangEnCheckBox"].Checked,
+    }
+    
+    settings_file = os.path.join(SCRIPT_PATH, "config", "settings.json")
+    try:
+        os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+        
+        with open(settings_file, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=4)
+        print(f"Settings saved to {settings_file}")
+    except OSError as e:
+        print(f"Error saving settings to {settings_file}: {e.strerror}")
+
 def on_close(ev):
     for temp_dir in [AUDIO_TEMP_DIR, SUB_TEMP_DIR]:
         if os.path.exists(temp_dir):
@@ -1107,6 +1194,7 @@ def on_close(ev):
                 print(f"Removed temporary directory: {temp_dir}")
             except OSError as e:
                 print(f"Error removing directory {temp_dir}: {e.strerror}")
+    save_file()
     dispatcher.ExitLoop()
 win.On.MyWin.Close = on_close
 
