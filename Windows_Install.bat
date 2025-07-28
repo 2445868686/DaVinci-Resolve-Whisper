@@ -8,7 +8,7 @@ set "SCRIPT_NAME=DaVinci Whisper"
 set "WHEEL_DIR=C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\HB\%SCRIPT_NAME%\wheel"
 set "TARGET_DIR=C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\HB\%SCRIPT_NAME%\Lib"
 rem All required packages
-set "PACKAGES=faster-whisper==1.1.1 requests"
+set "PACKAGES=faster-whisper==1.1.1 requests regex"
 rem Tsinghua mirror for faster downloads (remove if not needed)
 set "PIP_MIRROR=-i https://pypi.tuna.tsinghua.edu.cn/simple"
 rem =============================================

@@ -17,7 +17,9 @@ SCRIPT_NAME="DaVinci Whisper"
 # 新增了 setuptools 和 wheel，它们是从源码（如 .tar.gz）构建和安装包所必需的工具
 # pip 会智能地利用它们来处理 googletrans 的源码包
 PACKAGES=(
-  "faster_whisper==1.1.1 requests"
+  "faster_whisper==1.1.1"
+  "requests"
+  "regex"
 )
 
 # DaVinci Resolve Fusion 脚本目录
