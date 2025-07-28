@@ -9,6 +9,9 @@ Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
 SCRIPT_KOFI_URL      = "https://ko-fi.com/heiba"
 SCRIPT_BILIBILI_URL  = "https://space.bilibili.com/385619394"
+
+MODEL_LINK_EN ="https://drive.google.com/drive/folders/16FLicjnstLhrl3yKgCHOvle5-3_mLii5?usp=sharing"
+MODEL_LINK_CN ="https://pan.baidu.com/s/1hRsXohFqYvXklHLosP55TA?pwd=8888"
 LANGUAGE_MAP = {
     "Auto":None,
     "中文（普通话）": "zh",
@@ -125,6 +128,7 @@ if not hasattr(sys.stderr, "flush"):
 
 try:
     import requests
+    import regex as re_u
     import faster_whisper
 except ImportError:
     system = platform.system()
@@ -143,6 +147,7 @@ except ImportError:
 
     try:
         import requests
+        import regex as re_u
         import faster_whisper
         print(lib_dir)
     except ImportError as e:
@@ -179,78 +184,90 @@ class TranscriptionProvider(ABC):
 
 class FasterWhisperProvider(TranscriptionProvider):
     """Transcription provider using the faster-whisper library."""
-    CJK_LANGS = {"zh", "ja", "th", "lo", "km", "my", "bo"}
     def get_available_models(self) -> List[str]:
         return ["tiny", "small", "base", "medium", "large-v3"]
-    # ----------------- 1. _normalize_text -----------------
+    # 将逐字分词的语言
+    CJK_LANGS = {"zh", "ja", "ko", "th", "lo", "km", "my", "bo"}
+    # 1️⃣ 纯符号集合（无转义）
+    _SYMS_RAW = "%％$€¥+-–—#&@°℃"
+
+    # 2️⃣ 构造“可复用”的字符类，全部转义后再放进 []
+    _SYM_CLASS = re_u.escape(_SYMS_RAW)          # "%％\$€¥\+\-\–—#&@°℃"
+    _SYM_CLASS = f"[{_SYM_CLASS}]"
+    # ---------- 正则 ----------
+    _CJK_PATTERN = re_u.compile(
+        r"(?:\s+[A-Za-z0-9][A-Za-z0-9'\-]*|[A-Za-z0-9][A-Za-z0-9'\-]*"
+        r"|\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}"
+        r"|\p{Thai}|\p{Lao}|\p{Khmer}|\p{Myanmar}|\p{Tibetan}"
+        r"|[^\s])", flags=re_u.VERSION1)
+
+    _NON_CJK_PATTERN = re_u.compile(
+        rf"(?:\s+[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
+        rf"|[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
+        rf"|[.,!?…;:，。？！；：{_SYM_CLASS[1:-1]}]|\s+)",
+        flags=re_u.VERSION1
+    )
+
+    # 拆 Whisper 非 CJK word 内标点
+    _WHISPER_NON_CJK_SPLIT = re_u.compile(
+        rf"([\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
+        rf"|[.,!?…;:，。？！；：{_SYM_CLASS[1:-1]}])",
+        flags=re_u.VERSION1
+    )
+    # ---------- 辅助 ----------
+    @staticmethod
+    def _insert_boundary_spaces(text: str) -> str:
+        cjk = "Han|Hiragana|Katakana|Hangul|Thai|Lao|Khmer|Myanmar|Tibetan"
+        text = re_u.sub(rf"(\p{{{cjk}}})([A-Za-z0-9])", r"\1 \2", text)
+        return re_u.sub(rf"([A-Za-z0-9])(\p{{{cjk}}})", r"\1 \2", text)
+
+    @staticmethod
+    def _preprocess_camel_case(text: str) -> str:
+        return re_u.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+
+    # ---------- 1. _normalize_text ----------
     def _normalize_text(self, text: str, language: Optional[str]) -> List[str]:
-        """
-        CJK: 逐字 + 英文整词；Other: 原先逐词策略
-        - 在中英/英中交界处自动补 1 个空格，避免黏连
-        - token 中保留前导空格，让拆分计数与显示一致
-        """
-        if language not in self.CJK_LANGS:
-            # 非 CJK 维持你之前的实现
-            return re.findall(r"\s*\S+", text.strip())
+        text = self._preprocess_camel_case(text.strip())
+        text = re_u.sub(r"\s+", " ", text)
+        if language in self.CJK_LANGS:
+            text = self._insert_boundary_spaces(text)
+            return self._CJK_PATTERN.findall(text)
+        return [tk for tk in self._NON_CJK_PATTERN.findall(text) if tk.strip()]
 
-        # -------- ① 清洗 & 补空格 --------
-        # collapse 多空格
-        text = re.sub(r"\s+", " ", text.strip())
-
-        PUNCTS = r"\.\,\?\!，。？！"
-        text = re.sub(fr"([\u4e00-\u9fff{PUNCTS}])([A-Za-z0-9])", r"\1 \2", text)
-        text = re.sub(fr"([A-Za-z0-9])([\u4e00-\u9fff])",         r"\1 \2", text)
-
-        # -------- ② 分词：单个 CJK 字，或“空格+英文词”，或其他符号 --------
-        token_pattern = re.compile(
-            r"(?:\s+[A-Za-z0-9][A-Za-z0-9'\-]*"   # ① 空格 + 英文词
-            r"|[A-Za-z0-9][A-Za-z0-9'\-]*"        # ② 句首/标点后英文词
-            r"|[\u4e00-\u9fff]"                   # ③ 单个 CJK
-            r"|[^\s])" )                          # ④ 其它非空白符
-
-        return token_pattern.findall(text)
-
-    # ----------------- 2. _collect_words ------------------
-    def _collect_words(self, segments_gen) -> List[Dict]:
-        """
-        CJK: 单字 / ' 空格+英文词 ' ；非 CJK: 整词
-        Whisper 的 w.word 里本就带前导空格，直接利用
-        """
-        pattern = re.compile(
-            r"(?:\s+[A-Za-z0-9][A-Za-z0-9'\-]*|[\u4e00-\u9fff]|[^\s])"
-        )
-        tokens = []
+    # ---------- 2. _collect_words ----------
+    def _collect_words(self, segments_gen, language: Optional[str]) -> List[Dict]:
+        tokens: List[Dict] = []
         for seg in segments_gen:
             if not seg.words:
                 continue
             for w in seg.words:
-                for tk in pattern.findall(w.word):
-                    tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
+                if language in self.CJK_LANGS:
+                    for tk in self._CJK_PATTERN.findall(w.word):
+                        tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
+                else:
+                    # 非 CJK：把 Whisper word 中结尾/开头标点拆出
+                    for tk in self._WHISPER_NON_CJK_SPLIT.findall(w.word.lstrip()):
+                        tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
         return tokens
 
-    # ----------------- 3. _align_time ---------------------
+    # ---------- 3. _align_time ----------
     def _align_time(self, whisper_tokens: List[Dict], gpt_tokens: List[str]) -> Generator:
-        """
-        基本逻辑与之前相同，只是字段名改为 token
-        """
         from types import SimpleNamespace
-        A = [t["token"] for t in whisper_tokens]
-        B = gpt_tokens
-
-        matcher = SequenceMatcher(None, A, B, autojunk=False)
+        A_cmp = [t["token"].lstrip() for t in whisper_tokens]
+        B_cmp = [b.lstrip() for b in gpt_tokens]
+        matcher = SequenceMatcher(None, A_cmp, B_cmp, autojunk=False)
         mapping = {}
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == "equal":
                 for k in range(i2 - i1):
                     mapping[j1 + k] = i1 + k
 
-        aligned = []
-        B_keys = sorted(mapping.keys())
-        for j, tok in enumerate(B):
-            if j in mapping:                                  # 直接命中
+        aligned, B_keys = [], sorted(mapping.keys())
+        for j, tok in enumerate(gpt_tokens):
+            if j in mapping:
                 w = whisper_tokens[mapping[j]]
                 start, end = w["start"], w["end"]
-            else:                                             # 简单插值
+            else:
                 prev = next((k for k in reversed(B_keys) if k < j), None)
                 nxt  = next((k for k in B_keys if k > j), None)
                 if prev is not None and nxt is not None and prev != nxt:
@@ -265,12 +282,15 @@ class FasterWhisperProvider(TranscriptionProvider):
                     start = 0.0
                 end = start + 0.05
             aligned.append({"word": tok, "start": start, "end": end})
+            
+        if aligned and whisper_tokens:
+            last_whisper_token_end = whisper_tokens[-1]["end"]
+            aligned[-1]["end"] = max(aligned[-1]["end"], last_whisper_token_end)
 
-        fake_segment = SimpleNamespace(
-            words=[SimpleNamespace(word=t["word"], start=t["start"], end=t["end"])
-                for t in aligned]
-        )
-        yield fake_segment
+        yield SimpleNamespace(words=[
+            SimpleNamespace(word=t["word"], start=t["start"], end=t["end"])
+            for t in aligned])
+
 
     def _split_segments_by_max_chars(self, segments: Generator, max_chars: int) -> List[Dict]:
         END_OF_CLAUSE_CHARS = tuple(".,?!。，？！")
@@ -369,7 +389,7 @@ class FasterWhisperProvider(TranscriptionProvider):
                 )
                 resp.raise_for_status()
                 json_resp = resp.json()
-                print(json_resp)
+                print(json_resp.get("text", ""))
                 return json_resp.get("text", "")
             except (requests.exceptions.ConnectTimeout,
                     requests.exceptions.ReadTimeout,
@@ -447,9 +467,13 @@ class FasterWhisperProvider(TranscriptionProvider):
                 hotwords=None,
             )
             gpt_tokens     = self._normalize_text(text, info.language)
+            print("-------------DEBUG GPT TOKEN-------------")
             print(gpt_tokens)
-            whisper_tokens = self._collect_words(segments_gen)
+            print("-------------DEBUG GPT TOKEN-------------\n")
+            whisper_tokens = self._collect_words(segments_gen, info.language)
+            print("-------------DEBUG WHISPER TOKEN-------------")
             print(whisper_tokens)
+            print("-------------DEBUG WHISPER TOKEN-------------\n")
             segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
         else:
             segments_to_split = segments_gen
@@ -469,7 +493,9 @@ class FasterWhisperProvider(TranscriptionProvider):
             output_filename = f"{base}_whisper"
         os.makedirs(output_dir, exist_ok=True)
         srt_path = os.path.join(output_dir, f"{output_filename}.srt")
+        print("-------------DEBUG FINAL TOKEN-------------")
         print(subtitle_blocks)
+        print("-------------DEBUG FINAL TOKEN-------------\n")
         self._write_srt(srt_path, subtitle_blocks)
 
         if verbose: print(f"[Whisper] Generated SRT: {srt_path}")
@@ -665,7 +691,7 @@ class OpenAIProvider(TranscriptionProvider):
         data = {
             "model": model_name,
             "response_format": "json",
-            #"timestamp_granularities[]": "word",
+            "timestamp_granularities[]": "word",
         }
         
         if language: data["language"] = language
@@ -770,8 +796,11 @@ win = dispatcher.AddWindow(
                 
                 ui.HGroup({"Weight":0.1},[
                     ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.1}),
-                    ui.ComboBox({"ID":"ModelCombo","Weight":0.1}),
-                    
+                    ui.ComboBox({"ID":"ModelCombo","Weight":0.1}),                    
+                ]),
+                ui.HGroup({"Weight":0.1},[
+                    ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
+                    ui.Button({"ID":"DownloadButton","Text":"Download Model","Weight":0}),
                 ]),
                 ui.HGroup({"Weight":0.1},[
                     #ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
@@ -876,6 +905,7 @@ translations = {
         "LangLabel":"语言", 
         "ModelLabel":"模型", 
         "CreateButton":"创建", 
+        "DownloadButton":"模型下载",
         "HotwordsLabel":"短语列表 / 提示", 
         "MaxCharsLabel":"每行最大字符", 
         "NoGapCheckBox":"字幕之间无间隙",
@@ -889,6 +919,7 @@ translations = {
         "TitleLabel":"Create subtitles from audio", 
         "LangLabel":"Language", 
         "ModelLabel":"Model", 
+        "DownloadButton":"Download Model",
         "CreateButton":"Create", 
         "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
@@ -910,6 +941,7 @@ for lang_display_name in LANGUAGE_MAP.keys():
 def populate_models(use_openai):
     provider = openai_provider if use_openai else faster_whisper_provider
     items["SmartCheckBox"].Enabled = not use_openai
+    items["DownloadButton"].Enabled = not use_openai
     items["SmartCheckBox"].Checked = False
     if use_openai:
         openai_config_window.Show() 
@@ -1157,6 +1189,13 @@ def on_create_clicked(ev):
         
 win.On.CreateButton.Clicked = on_create_clicked
 
+def on_download_clicked(ev):
+    show_dynamic_message("Place the downloaded model into the plugin's model folder.","请将下载的模型放入插件的 model 文件夹。")
+    url = MODEL_LINK_EN if items["LangEnCheckBox"].Checked else MODEL_LINK_CN
+    time.sleep(2)
+    webbrowser.open(url)
+win.On.DownloadButton.Clicked = on_download_clicked
+    
 def on_open_link_button_clicked(ev):
     url = SCRIPT_KOFI_URL if items["LangEnCheckBox"].Checked else SCRIPT_BILIBILI_URL
     webbrowser.open(url)
