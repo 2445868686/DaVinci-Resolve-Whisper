@@ -13,16 +13,14 @@ SCRIPT_BILIBILI_URL  = "https://space.bilibili.com/385619394"
 MODEL_LINK_EN ="https://drive.google.com/drive/folders/16FLicjnstLhrl3yKgCHOvle5-3_mLii5?usp=sharing"
 MODEL_LINK_CN ="https://pan.baidu.com/s/1hRsXohFqYvXklHLosP55TA?pwd=8888"
 LANGUAGE_MAP = {
-    "Auto":None,
+    "Auto": None,
     "中文（普通话）": "zh",
-    "中文（粤语）": "yue",
     "English": "en",
     "Japanese": "ja",
     "Korean": "ko",
     "Spanish": "es",
     "Portuguese": "pt",
     "French": "fr",
-    "Indonesian": "id",
     "German": "de",
     "Russian": "ru",
     "Italian": "it",
@@ -30,8 +28,26 @@ LANGUAGE_MAP = {
     "Turkish": "tr",
     "Ukrainian": "uk",
     "Vietnamese": "vi",
+    "Thai": "th",
+    "Lao": "lo",
+    "Khmer": "km",
+    "Burmese": "my",
+    "Tibetan": "bo",
+    "Indonesian": "id",
+    "Dutch": "nl",
     "Uzbek": "uz",
-    "Dutch": "nl"
+    "Polish": "pl",
+    "Czech": "cs",
+    "Danish": "da",
+    "Finnish": "fi",
+    "Swedish": "sv",
+    "Hebrew": "he",
+    "Greek": "el",
+    "Hindi": "hi",
+    "Bengali": "bn",
+    "Swahili": "sw",
+    "Malay": "ms",
+    "Romanian": "ro"
 }
 
 import os
@@ -45,7 +61,6 @@ import shutil
 import glob
 import re
 import json
- # Added for OpenAI API
 from difflib import SequenceMatcher
 from typing import Optional, List, Generator, Dict
 from abc import ABC, abstractmethod
@@ -183,38 +198,51 @@ class TranscriptionProvider(ABC):
                 f.write(f"{blk['text'].strip()}\n\n")
 
 class FasterWhisperProvider(TranscriptionProvider):
-    """Transcription provider using the faster-whisper library."""
+    """Transcription provider using the faster‑whisper library."""
+
+    # ---------------- 公共配置 ----------------
     def get_available_models(self) -> List[str]:
         return ["tiny", "small", "base", "medium", "large-v3"]
-    # 将逐字分词的语言
+
+    # 逐字分词的语言集合
     CJK_LANGS = {"zh", "ja", "ko", "th", "lo", "km", "my", "bo"}
-    # 1️⃣ 纯符号集合（无转义）
-    _SYMS_RAW = "%％$€¥+-–—#&@°℃"
 
-    # 2️⃣ 构造“可复用”的字符类，全部转义后再放进 []
-    _SYM_CLASS = re_u.escape(_SYMS_RAW)          # "%％\$€¥\+\-\–—#&@°℃"
-    _SYM_CLASS = f"[{_SYM_CLASS}]"
-    # ---------- 正则 ----------
+    # ---------- 1. 通用符号 ----------
+    _SYMS_RAW   = "%％$€¥+-–—#&@°℃"
+    _SYM_CLASS  = re_u.escape(_SYMS_RAW)          # "%％\$€¥\+\-\–—#&@°℃"
+    _SYM_CLASS  = f"[{_SYM_CLASS}]"              # 供字符类复用
+
+    # ---------- 2. 文件 / 标识符 token ----------
+    # 连续字母数字，中间可含 . _ - ，但首尾均为字母/数字
+    _FILELIKE = r"[\p{L}\p{Nd}]+(?:[._-][\p{L}\p{Nd}]+)+"
+
+    # ---------- 3. 正则模式 ----------
+    # 3‑1 CJK 语境下的分词
     _CJK_PATTERN = re_u.compile(
-        r"(?:\s+[A-Za-z0-9][A-Za-z0-9'\-]*|[A-Za-z0-9][A-Za-z0-9'\-]*"
-        r"|\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}"
-        r"|\p{Thai}|\p{Lao}|\p{Khmer}|\p{Myanmar}|\p{Tibetan}"
-        r"|[^\s])", flags=re_u.VERSION1)
+        rf"(?:\s+(?:{_FILELIKE}|[A-Za-z0-9][A-Za-z0-9'\-]*)"
+        rf"|(?:{_FILELIKE}|[A-Za-z0-9][A-Za-z0-9'\-]*)"
+        rf"|\p{{Han}}|\p{{Hiragana}}|\p{{Katakana}}|\p{{Hangul}}"
+        rf"|\p{{Thai}}|\p{{Lao}}|\p{{Khmer}}|\p{{Myanmar}}|\p{{Tibetan}}"
+        rf"|[^\s])",
+        flags=re_u.VERSION1
+    )
 
+    # 3‑2 非 CJK 语境下的分词
     _NON_CJK_PATTERN = re_u.compile(
-        rf"(?:\s+[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
-        rf"|[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
+        rf"(?:\s+(?:{_FILELIKE}|[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*){_SYM_CLASS}?"
+        rf"|(?:{_FILELIKE}|[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*){_SYM_CLASS}?"
         rf"|[.,!?…;:，。？！；：{_SYM_CLASS[1:-1]}]|\s+)",
         flags=re_u.VERSION1
     )
 
-    # 拆 Whisper 非 CJK word 内标点
+    # 3‑3 拆分 Whisper 非 CJK word 中的内部标点
     _WHISPER_NON_CJK_SPLIT = re_u.compile(
-        rf"([\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
+        rf"(?:{_FILELIKE}|[\p{{L}}\p{{Nd}}][\p{{L}}\p{{Nd}}'\-]*{_SYM_CLASS}?"
         rf"|[.,!?…;:，。？！；：{_SYM_CLASS[1:-1]}])",
         flags=re_u.VERSION1
     )
-    # ---------- 辅助 ----------
+
+    # ---------- 4. 辅助方法 ----------
     @staticmethod
     def _insert_boundary_spaces(text: str) -> str:
         cjk = "Han|Hiragana|Katakana|Hangul|Thai|Lao|Khmer|Myanmar|Tibetan"
@@ -225,7 +253,7 @@ class FasterWhisperProvider(TranscriptionProvider):
     def _preprocess_camel_case(text: str) -> str:
         return re_u.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
 
-    # ---------- 1. _normalize_text ----------
+    # ---------- 5. _normalize_text ----------
     def _normalize_text(self, text: str, language: Optional[str]) -> List[str]:
         text = self._preprocess_camel_case(text.strip())
         text = re_u.sub(r"\s+", " ", text)
@@ -234,7 +262,7 @@ class FasterWhisperProvider(TranscriptionProvider):
             return self._CJK_PATTERN.findall(text)
         return [tk for tk in self._NON_CJK_PATTERN.findall(text) if tk.strip()]
 
-    # ---------- 2. _collect_words ----------
+    # ---------- 6. _collect_words ----------
     def _collect_words(self, segments_gen, language: Optional[str]) -> List[Dict]:
         tokens: List[Dict] = []
         for seg in segments_gen:
@@ -245,7 +273,6 @@ class FasterWhisperProvider(TranscriptionProvider):
                     for tk in self._CJK_PATTERN.findall(w.word):
                         tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
                 else:
-                    # 非 CJK：把 Whisper word 中结尾/开头标点拆出
                     for tk in self._WHISPER_NON_CJK_SPLIT.findall(w.word.lstrip()):
                         tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
         return tokens
@@ -316,7 +343,11 @@ class FasterWhisperProvider(TranscriptionProvider):
                     continue
 
                 potential_len = len(current_block["text"]) + len(word_text)
-                word_ends_clause = word_text.strip().endswith(END_OF_CLAUSE_CHARS)
+                word_stripped = word_text.strip()
+                word_ends_clause = (
+                    word_stripped.endswith(END_OF_CLAUSE_CHARS)
+                    and len(word_stripped) == 1            # 只截断单独的句末标点
+)
 
                 if potential_len <= max_chars:
                     current_block["text"] += word_text
