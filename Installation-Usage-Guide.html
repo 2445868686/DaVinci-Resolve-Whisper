@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DaVinci Resolve Whisper – 中 / EN</title>
+
+  <!-- ===== 公共样式（两版一致，只保留一份） ===== -->
+  <style>
+    /* 全局字体与背景 */
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: #f0f2f5;
+      color: #555;
+    }
+
+    /* 固定左侧目录 */
+    .sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 250px;
+      height: 100%;
+      background: #fff;
+      border-right: 1px solid #e0e0e0;
+      padding: 20px;
+      overflow-y: auto;
+      box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+    }
+    .sidebar h2 {
+      font-size: 1.8em;
+      margin: 0 0 20px;
+      color: #333;
+      text-align: center;
+      border-bottom: 1px solid #e0e0e0;
+      padding-bottom: 10px;
+    }
+    .sidebar ul {
+      list-style: none;
+      padding: 0;
+    }
+    .sidebar li {
+      margin: 10px 0;
+      font-size: 0.95em;
+    }
+    .sidebar li ul {
+      margin-top: 5px;
+      margin-left: 15px;
+    }
+    .sidebar a {
+      text-decoration: none;
+      color: #007bff;
+      transition: color 0.3s;
+    }
+    .sidebar a:hover {
+      color: #0056b3;
+    }
+
+    /* 主内容区 */
+    .content {
+      margin-left: 270px; /* 250 + 20 */
+      padding: 40px;
+    }
+
+    /* 卡片式容器 */
+    .container {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      padding: 30px;
+      margin-bottom: 40px;
+    }
+    header {
+      text-align: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #e0e0e0;
+      margin-bottom: 30px;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 2em;
+      color: #333;
+    }
+    h2 {
+      color: #007bff;
+      margin-top: 30px;
+      border-left: 4px solid #007bff;
+      padding-left: 10px;
+    }
+    h3 {
+      color: #333;
+      margin-top: 20px;
+    }
+    p,
+    ul {
+      line-height: 1.8;
+      margin: 15px 0;
+    }
+    ul {
+      padding-left: 20px;
+    }
+    code {
+      background: #f9f9f9;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: Consolas, Monaco, "Courier New", monospace;
+    }
+    pre {
+      background: #f9f9f9;
+      padding: 15px;
+      border-left: 5px solid #007bff;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-family: Consolas, Monaco, "Courier New", monospace;
+    }
+    a {
+      color: #007bff;
+    }
+    footer {
+      text-align: center;
+      font-size: 0.9em;
+      color: #888;
+      margin-top: 40px;
+      border-top: 1px solid #e0e0e0;
+      padding-top: 20px;
+    }
+
+    /* 移动端适配 */
+    @media (max-width: 768px) {
+      .sidebar {
+        position: relative;
+        width: 100%;
+        height: auto;
+        box-shadow: none;
+        border-right: none;
+        border-bottom: 1px solid #e0e0e0;
+      }
+      .content {
+        margin-left: 0;
+        padding: 20px;
+      }
+    }
+
+    /* ===== 语言切换相关 ===== */
+    .lang {
+      display: none;
+    }
+    .lang.active {
+      display: block;
+    }
+
+    /* 切换按钮 */
+    .lang-switcher {
+      position: fixed;
+      top: 15px;
+      right: 20px;
+      z-index: 1000;
+    }
+    .lang-switcher button {
+      cursor: pointer;
+      border: 1px solid #007bff;
+      background: #fff;
+      color: #007bff;
+      font-size: 0.9em;
+      padding: 6px 12px;
+      border-radius: 20px;
+      transition: all 0.3s;
+      margin-left: 6px;
+    }
+    .lang-switcher button.active,
+    .lang-switcher button:hover {
+      background: #007bff;
+      color: #fff;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- ===== 语言切换按钮 ===== -->
+  <div class="lang-switcher">
+    <button id="btn-zh" class="active">中文</button>
+    <button id="btn-en">English</button>
+  </div>
+
+  <!-- ========== 中文版本（默认显示） ========== -->
+  <div id="lang-zh" class="lang active">
+    <!-- *** 以下整块内容来自您提供的中文HTML，未做任何修改 *** -->
+    <!-- 固定左侧目录 -->
+    <nav class="sidebar">
+      <h2>目录</h2>
+      <ul>
+        <li>
+          <strong>安装指南</strong>
+          <ul>
+            <li><a href="#step-1">步骤 1：检查 Python</a></li>
+            <li><a href="#step-2">步骤 2：移动插件</a></li>
+            <li><a href="#step-3">步骤 3：安装依赖</a></li>
+          </ul>
+        </li>
+      </ul>
+    </nav>
+
+    <!-- 主内容 -->
+    <div class="content">
+      <!-- 安装指南 -->
+      <div class="container" id="install-guide">
+        <header>
+          <h1>DaVinci Resolve Whisper 安装指南</h1>
+        </header>
+        <section id="step-1">
+          <h2>步骤 1：检查 DaVinci Resolve 中是否已安装 Python</h2>
+          <p>
+            点击：<code>工作区</code> ——&gt; <code>控制台</code> ——&gt; <code>Py3</code>。如果已安装，则不会弹出窗口（直接进入
+            <a href="#step-2">步骤 2</a>）。
+          </p>
+          <p>
+            若未安装，则会弹出 "<strong>Python was not found</strong>"
+            消息，请根据提示下载并安装，安装完成后进入<a href="#step-2">步骤 2</a>！
+          </p>
+          <p>
+            <strong>Windows 用户：</strong>安装 Python 时请务必勾选 "<span
+              style="color: red"
+              >Add Python to PATH</span
+            >" 选项，否则可能需要重新安装或手动设置环境变量。
+          </p>
+        </section>
+        <section id="step-2">
+          <h2>步骤 2：移动 Whisper 插件</h2>
+          <p>将 <code>Whisper</code> 文件夹移动到以下位置：</p>
+          <pre><code>Mac: 
+/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility 
+
+Win: 
+C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></pre>
+        </section>
+        <section id="step-3">
+          <h2>步骤 3：安装依赖</h2>
+          
+          <h3>Mac 用户：</h3>
+          <p>
+            双击 <code>Mac_Install.command</code> 进行安装，等待安装完成。
+          </p>
+          <h3>Win 用户：</h3>
+          <p>
+            双击 <code>Windows_Install.bat</code> 进行安装，等待安装完成。
+          </p>
+          <p>
+            安装完成后，可通过 <code>工作台</code> ——&gt; <code>脚本</code> 菜单打开插件进行使用。
+          </p>
+        </section>
+      </div>
+      <footer>&copy; 2025 HB. All Rights Reserved.</footer>
+    </div>
+  </div>
+  <!-- ===== 中文版本结束 ===== -->
+
+  <!-- ========== English Version ========== -->
+  <div id="lang-en" class="lang">
+    <!-- *** 以下整块内容来自您提供的英文HTML，未做任何修改 *** -->
+    <nav class="sidebar">
+      <h2>Contents</h2>
+      <ul>
+        <li>
+          <strong>Installation Guide</strong>
+          <ul>
+            <li><a href="#step-1-en">Step 1: Check Python</a></li>
+            <li><a href="#step-2-en">Step 2: Move Plugin</a></li>
+            <li><a href="#step-3-en">Step 3: Install Requirement</a></li>
+          </ul>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="content">
+      <!-- Installation Guide -->
+      <div class="container" id="install-guide-en">
+        <header>
+          <h1>DaVinci Resolve Whisper Installation Guide</h1>
+        </header>
+        <section id="step-1-en">
+          <h2>Step 1: Check if Python is Installed in DaVinci Resolve</h2>
+          <p>
+            Click: <code>Workspace</code> ——&gt; <code>Console</code> ——&gt;
+            <code>Py3</code>. If it is already installed, no window will pop up
+            (proceed directly to <a href="#step-2-en">Step 2</a>).
+          </p>
+          <p>
+            If it is not installed, a "<strong>Python was not found</strong>"
+            message will pop up. Follow the pop-up instructions to download and
+            install it. After installation, proceed to
+            <a href="#step-2-en">Step 2</a>!
+          </p>
+          <p>
+            <strong>Important for Windows users:</strong> During Python
+            installation, make sure to check the
+            "<span style="color: red">Add Python to PATH</span>" option. If you
+            forget this step, you may need to reinstall Python or manually add
+            it to the system's environment variables.
+          </p>
+        </section>
+        <section id="step-2-en">
+          <h2>Step 2: Move the Whisper Plugin</h2>
+          <p>Move the <code>Whisper</code> folder to the following location:</p>
+          <pre><code>Mac: 
+/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility 
+
+Win: 
+C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></pre>
+        </section>
+        <section id="step-3-en">
+          <h2>Step 3: Install Requirement</h2>
+          
+          <h3>For Mac Users:</h3>
+          <p>
+            Double-click the <code>Mac_Install.command</code>,Install it and wait for it to complete..
+          </p>
+          <h3>For Windows Users:</h3>
+          <p>
+            Double-click the <code>Windows_Install.bat</code>,Install it and wait for it to complete..
+          </p>
+          <p>
+            After installation, open the plugin in DaVinci Resolve by navigating to <code>Workspace</code> ——&gt; <code>Scripts</code>.
+          </p>
+        </section>
+      </div>
+        <footer>&copy; 2025 HB. All Rights Reserved.</footer>
+    </div>
+  </div>
+  <!-- ===== English Version 结束 ===== -->
+
+  <!-- ===== 语言切换脚本 ===== -->
+  <script>
+    const btnZh = document.getElementById("btn-zh");
+    const btnEn = document.getElementById("btn-en");
+    const langZh = document.getElementById("lang-zh");
+    const langEn = document.getElementById("lang-en");
+
+    /* 切换到中文 */
+    btnZh.addEventListener("click", () => {
+      btnZh.classList.add("active");
+      btnEn.classList.remove("active");
+      langZh.classList.add("active");
+      langEn.classList.remove("active");
+      document.documentElement.lang = "zh-CN";
+    });
+
+    /* 切换到英文 */
+    btnEn.addEventListener("click", () => {
+      btnEn.classList.add("active");
+      btnZh.classList.remove("active");
+      langEn.classList.add("active");
+      langZh.classList.remove("active");
+      document.documentElement.lang = "en";
+    });
+  </script>
+</body>
+</html>
