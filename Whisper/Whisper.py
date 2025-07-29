@@ -3,7 +3,7 @@ SCRIPT_VERSION = " 1.0" # Updated version
 SCRIPT_AUTHOR  = "HEIBA"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-WINDOW_WIDTH, WINDOW_HEIGHT = 300, 400
+WINDOW_WIDTH, WINDOW_HEIGHT = 300, 410
 X_CENTER = (SCREEN_WIDTH  - WINDOW_WIDTH ) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
@@ -69,7 +69,13 @@ SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 AUDIO_TEMP_DIR = os.path.join(SCRIPT_PATH, "audio_temp")
 SUB_TEMP_DIR = os.path.join(SCRIPT_PATH, "sub_temp")
 SETTINGS = os.path.join(SCRIPT_PATH, "config", "settings.json")
+LANGUAGE_SUPPORT = os.path.join(SCRIPT_PATH, "config", "language_support.json")
 RAND_CODE = "".join(random.choices(string.digits, k=2))
+
+if LANGUAGE_SUPPORT :
+    with open(LANGUAGE_SUPPORT, "r", encoding="utf-8") as f:
+        LANGUAGE_MAP = json.load(f)
+
 DEFAULT_SETTINGS = {
 
     "OPENAI_FORMAT_BASE_URL": "",
@@ -941,7 +947,7 @@ translations = {
         "MaxCharsLabel":"每行最大字符", 
         "NoGapCheckBox":"字幕之间无间隙",
         "OnlineCheckBox": "使用 OpenAI API",
-        "SmartCheckBox": "智能修正 (beta)",
+        "SmartCheckBox": "AI字幕优化 (beta)",
         "OpenAIFormatLabel":"填写 OpenAI Format API 信息",
         "OpenAIConfirm":"确定",
         "OpenAIRegisterButton":"注册",
@@ -956,7 +962,7 @@ translations = {
         "MaxCharsLabel":"Max Chars", 
         "NoGapCheckBox":"No Gaps Between Subtitles",
         "OnlineCheckBox": "Use OpenAI API",
-        "SmartCheckBox": "Smarter (beta)",
+        "SmartCheckBox": "AI Correct (beta)",
         "OpenAIFormatLabel":"OpenAI Format API",
         "OpenAIConfirm":"Confirm",
         "OpenAIRegisterButton":"Register",
@@ -1211,7 +1217,7 @@ def on_create_clicked(ev):
         else:
             print("Failed to generate SRT. Provider might have failed.")
             if not use_openai:
-                show_dynamic_message("Transcription Failed. Model may be missing.", "转录失败。可能缺少模型文件。")
+                show_dynamic_message("Model file is missing. Click the 'Download Model' button.", "缺少模型文件,请点击模型下载按钮。")
             # OpenAI provider shows its own specific error messages
             
     except Exception as e:
