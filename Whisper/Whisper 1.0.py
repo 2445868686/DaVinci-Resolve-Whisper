@@ -8,7 +8,7 @@ X_CENTER = (SCREEN_WIDTH  - WINDOW_WIDTH ) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
 SCRIPT_KOFI_URL      = "https://ko-fi.com/heiba"
-SCRIPT_BILIBILI_URL  = "https://space.bilibili.com/385619394"
+SCRIPT_BILIBILI_URL  = "https://shop120058726.taobao.com"
 
 MODEL_LINK_EN ="https://drive.google.com/drive/folders/16FLicjnstLhrl3yKgCHOvle5-3_mLii5?usp=sharing"
 MODEL_LINK_CN ="https://pan.baidu.com/s/1hRsXohFqYvXklHLosP55TA?pwd=8888"
@@ -72,7 +72,7 @@ SETTINGS = os.path.join(SCRIPT_PATH, "config", "settings.json")
 LANGUAGE_SUPPORT = os.path.join(SCRIPT_PATH, "config", "language_support.json")
 RAND_CODE = "".join(random.choices(string.digits, k=2))
 
-if LANGUAGE_SUPPORT :
+if os.path.exists(LANGUAGE_SUPPORT):
     with open(LANGUAGE_SUPPORT, "r", encoding="utf-8") as f:
         LANGUAGE_MAP = json.load(f)
 
@@ -504,13 +504,13 @@ class FasterWhisperProvider(TranscriptionProvider):
                 hotwords=None,
             )
             gpt_tokens     = self._normalize_text(text, info.language)
-            print("-------------DEBUG GPT TOKEN-------------")
-            print(gpt_tokens)
-            print("-------------DEBUG GPT TOKEN-------------\n")
+            #print("-------------DEBUG GPT TOKEN-------------")
+            #print(gpt_tokens)
+            #print("-------------DEBUG GPT TOKEN-------------\n")
             whisper_tokens = self._collect_words(segments_gen, info.language)
-            print("-------------DEBUG WHISPER TOKEN-------------")
-            print(whisper_tokens)
-            print("-------------DEBUG WHISPER TOKEN-------------\n")
+            #print("-------------DEBUG WHISPER TOKEN-------------")
+            #print(whisper_tokens)
+            #print("-------------DEBUG WHISPER TOKEN-------------\n")
             segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
         else:
             segments_to_split = segments_gen
@@ -530,9 +530,9 @@ class FasterWhisperProvider(TranscriptionProvider):
             output_filename = f"{base}_whisper"
         os.makedirs(output_dir, exist_ok=True)
         srt_path = os.path.join(output_dir, f"{output_filename}.srt")
-        print("-------------DEBUG FINAL TOKEN-------------")
+        #print("-------------DEBUG FINAL TOKEN-------------")
         print(subtitle_blocks)
-        print("-------------DEBUG FINAL TOKEN-------------\n")
+        #print("-------------DEBUG FINAL TOKEN-------------\n")
         self._write_srt(srt_path, subtitle_blocks)
 
         if verbose: print(f"[Whisper] Generated SRT: {srt_path}")
@@ -946,6 +946,7 @@ translations = {
         "HotwordsLabel":"短语列表 / 提示", 
         "MaxCharsLabel":"每行最大字符", 
         "NoGapCheckBox":"字幕之间无间隙",
+        "CopyrightButton":f"更多功能 © 2025 {SCRIPT_AUTHOR} 版权所有",
         "OnlineCheckBox": "使用 OpenAI API",
         "SmartCheckBox": "AI字幕优化 (beta)",
         "OpenAIFormatLabel":"填写 OpenAI Format API 信息",
@@ -958,6 +959,7 @@ translations = {
         "ModelLabel":"Model", 
         "DownloadButton":"Download Model",
         "CreateButton":"Create", 
+        "CopyrightButton":f"More Features © 2025 by {SCRIPT_AUTHOR}",
         "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
         "NoGapCheckBox":"No Gaps Between Subtitles",
