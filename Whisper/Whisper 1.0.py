@@ -818,9 +818,9 @@ class OpenAIProvider(TranscriptionProvider):
 faster_whisper_provider = FasterWhisperProvider()
 openai_provider = OpenAIProvider()
 
-win = dispatcher.AddWindow(
+whisper_win = dispatcher.AddWindow(
     {
-        "ID": 'MyWin',
+        "ID": 'WhisperWin',
         "WindowTitle": SCRIPT_NAME + SCRIPT_VERSION,
         "Geometry": [X_CENTER, Y_CENTER, WINDOW_WIDTH, WINDOW_HEIGHT],
         "Spacing": 10,
@@ -971,7 +971,7 @@ translations = {
         }
 }
 
-items = win.GetItems()
+items = whisper_win.GetItems()
 msg_items = msgbox.GetItems()
 openai_items = openai_config_window.GetItems()
 for lang_display_name in LANGUAGE_MAP.keys():
@@ -995,11 +995,11 @@ def on_show_openai(ev):
         openai_config_window.Show()
     else:
         openai_config_window.Hide()
-win.On.SmartCheckBox.Clicked = on_show_openai
+whisper_win.On.SmartCheckBox.Clicked = on_show_openai
 
 def on_provider_switch(ev):
     populate_models(items["OnlineCheckBox"].Checked)
-win.On.OnlineCheckBox.Clicked = on_provider_switch
+whisper_win.On.OnlineCheckBox.Clicked = on_provider_switch
 populate_models(False) # Initial population
 
 def switch_language(lang):
@@ -1017,8 +1017,8 @@ def on_lang_checkbox_clicked(ev):
     items["LangEnCheckBox"].Checked = is_en_checked
     switch_language("en" if is_en_checked else "cn")
 
-win.On.LangCnCheckBox.Clicked = on_lang_checkbox_clicked
-win.On.LangEnCheckBox.Clicked = on_lang_checkbox_clicked
+whisper_win.On.LangCnCheckBox.Clicked = on_lang_checkbox_clicked
+whisper_win.On.LangEnCheckBox.Clicked = on_lang_checkbox_clicked
 
 def on_openai_close(ev):
     print("OpenAI API 配置完成")
@@ -1145,6 +1145,7 @@ def render_timeline_audio(output_dir: str, custom_name: str) -> Optional[str]:
         print("Rendering...")
         time.sleep(2)
     print("Render complete!")
+    project.DeleteRenderJob(job_id) # 
     return os.path.join(output_dir, f"{custom_name}.mp3")
 
 def on_create_clicked(ev):
@@ -1226,19 +1227,19 @@ def on_create_clicked(ev):
         show_dynamic_message(f"Error: {e}", f"错误: {e}")
         print(f"An error occurred: {e}")
         
-win.On.CreateButton.Clicked = on_create_clicked
+whisper_win.On.CreateButton.Clicked = on_create_clicked
 
 def on_download_clicked(ev):
     show_dynamic_message("Place the downloaded model into the plugin's model folder.","请将下载的模型放入插件的 model 文件夹。")
     url = MODEL_LINK_EN if items["LangEnCheckBox"].Checked else MODEL_LINK_CN
     time.sleep(2)
     webbrowser.open(url)
-win.On.DownloadButton.Clicked = on_download_clicked
+whisper_win.On.DownloadButton.Clicked = on_download_clicked
     
 def on_open_link_button_clicked(ev):
     url = SCRIPT_KOFI_URL if items["LangEnCheckBox"].Checked else SCRIPT_BILIBILI_URL
     webbrowser.open(url)
-win.On.CopyrightButton.Clicked = on_open_link_button_clicked
+whisper_win.On.CopyrightButton.Clicked = on_open_link_button_clicked
 
 def save_file():
     settings = {
@@ -1274,9 +1275,9 @@ def on_close(ev):
                 print(f"Error removing directory {temp_dir}: {e.strerror}")
     save_file()
     dispatcher.ExitLoop()
-win.On.MyWin.Close = on_close
+whisper_win.On.WhisperWin.Close = on_close
 
 loading_win.Hide() 
-win.Show()
+whisper_win.Show()
 dispatcher.RunLoop()
-win.Hide()
+whisper_win.Hide()
