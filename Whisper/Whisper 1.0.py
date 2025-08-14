@@ -11,7 +11,7 @@ SCRIPT_KOFI_URL      = "https://ko-fi.com/heiba"
 SCRIPT_BILIBILI_URL  = "https://shop120058726.taobao.com"
 
 MODEL_LINK_EN ="https://drive.google.com/drive/folders/16FLicjnstLhrl3yKgCHOvle5-3_mLii5?usp=sharing"
-MODEL_LINK_CN ="https://pan.baidu.com/s/1hRsXohFqYvXklHLosP55TA?pwd=8888"
+MODEL_LINK_CN ="https://pan.baidu.com/s/1kthNbHJAggTUT2cv9nKaUg?pwd=8888"
 LANGUAGE_MAP = {
     "Auto": None,
     "中文（普通话）": "zh",
@@ -64,7 +64,7 @@ import json
 from difflib import SequenceMatcher
 from typing import Optional, List, Generator, Dict
 from abc import ABC, abstractmethod
-
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 SCRIPT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 AUDIO_TEMP_DIR = os.path.join(SCRIPT_PATH, "audio_temp")
 SUB_TEMP_DIR = os.path.join(SCRIPT_PATH, "sub_temp")
@@ -471,18 +471,31 @@ class FasterWhisperProvider(TranscriptionProvider):
 
         local_model_path = os.path.join(SCRIPT_PATH, "model", model_name)
         try:
-            if verbose: 
-                show_dynamic_message(f"Loading model '{model_name}'...", f"正在加载模型 '{model_name}'...")
-            model = faster_whisper.WhisperModel(local_model_path)
+            if verbose:
+                show_dynamic_message(f"Loading model '{model_name}' on CPU...", f"正在以 CPU 模式加载模型 '{model_name}'...")
+            model = faster_whisper.WhisperModel(
+                local_model_path,
+                device="cpu",            # 关键：强制 CPU
+                compute_type="int8",     # 建议：CPU 上更省内存/更快；可换 "int8_float16"/"float32"
+                cpu_threads=max(1, (os.cpu_count() or 4) - 1),  # 预留 1 个线程给 UI
+                num_workers=1            # 适度；过多 worker 在 CPU 反而可能抖动
+            )
             pipeline = faster_whisper.BatchedInferencePipeline(model=model)
-            if verbose: 
-                show_dynamic_message(f"Model '{model_name}' loaded.", f"模型 '{model_name}' 加载成功。")
+            if verbose:
+                show_dynamic_message(f"Model '{model_name}' loaded (CPU).", f"模型 '{model_name}' (CPU) 加载成功。")
         except Exception as e:
             show_dynamic_message(f"Model '{model_name}' is unavailable", f"模型'{model_name}'不可用")
             print(f"Error loading model {model_name}: {e}")
             return None
 
-        transcribe_args = {"beam_size": 5, "log_progress": True, "batch_size": batch_size, "word_timestamps": True, "hotwords": hotwords, "vad_filter": vad_filter}
+        transcribe_args = {
+            "beam_size": 5,                # 降一点束宽，CPU 更快
+            "log_progress": True,
+            "batch_size": max(1, batch_size),  # CPU 下建议 1~2
+            "word_timestamps": True,
+            "hotwords": hotwords,
+            "vad_filter": vad_filter
+        }
         if language:
             transcribe_args["language"] = language
         print(transcribe_args)
@@ -885,7 +898,7 @@ msgbox = dispatcher.AddWindow(
         [
             ui.VGroup(
                 [
-                    ui.Label({"ID": 'WarningLabel', "Text": ""}),
+                    ui.Label({"ID": 'WarningLabel', "Text": "",'Alignment': { 'AlignCenter' : True },'WordWrap': True}),
                     ui.HGroup({"Weight": 0}, [ui.Button({"ID": 'OkButton', "Text": 'OK'})]),
                 ]
             ),
