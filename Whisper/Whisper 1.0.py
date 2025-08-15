@@ -60,7 +60,9 @@ import string
 import shutil
 import glob
 import re
+import io
 import json
+from itertools import tee
 from difflib import SequenceMatcher
 from typing import Optional, List, Generator, Dict
 from abc import ABC, abstractmethod
@@ -401,50 +403,128 @@ class FasterWhisperProvider(TranscriptionProvider):
                         language: Optional[str] = None,
                         hotwords: Optional[str] = None,
                         retries: int = 3,
+                        # 直接切片参数
+                        chunk_bytes: int = 5 * 1024 * 1024,   # 5MB 一片
+                        chunk_overlap_ratio: float = 0.0,    # 重叠比例（按字节）
+                        progress_callback=None
                         ) -> str:
-
+        """
+        总是切片上传（串行，带 prompt 接力），并通过 progress_callback 汇报进度。
+        返回：合并去重后的完整文本。
+        变更：当 chunk_overlap_ratio <= 0.1 时，不执行文本去重，直接拼接。
+        """
         headers = {"Authorization": f"Bearer {api_key}"}
         url     = f"{base_url.rstrip('/')}/v1/audio/transcriptions"
 
-        files = {
-            "file": (os.path.basename(file_path), open(file_path, "rb"), "audio/mpeg")
-        }
-        data  = {
-            "model": model_name,
-            "response_format": "json"
-        }
-        if language: data["language"] = language
-        if hotwords: data["prompt"]  = hotwords
+        def _safe_post(name: str, byts: bytes) -> str:
+            files = {"file": (name, io.BytesIO(byts), "audio/mpeg")}
+            data  = {"model": model_name, "response_format": "json"}
+            if language:
+                data["language"] = language
 
-        # ---------- 带重试的 POST ----------
-        last_err = None
-        for attempt in range(1, retries + 1):
-            try:
-                resp = requests.post(
-                    url, headers=headers, files=files, data=data,
-                    timeout=(10, 60)        # connect / read
-                )
-                resp.raise_for_status()
-                json_resp = resp.json()
-                print(json_resp.get("text", ""))
-                return json_resp.get("text", "")
-            except (requests.exceptions.ConnectTimeout,
-                    requests.exceptions.ReadTimeout,
-                    requests.exceptions.ConnectionError) as e:
-                print(f"[Attempt {attempt}] {e}")
-                last_err = e
-                if attempt < retries:
-                    time.sleep(2 ** attempt)   # 指数回退
-                    continue
-            except requests.exceptions.RequestException as e:
-                # HTTP 4xx/5xx 仍抛 RuntimeError，让上层决定怎么处理
+            last_err = None
+            for attempt in range(1, retries + 1):
                 try:
-                    err_msg = e.response.json()["error"]["message"]  # type: ignore
-                except Exception:
-                    err_msg = str(e)
-                raise RuntimeError(f"API Request failed: {err_msg}") from e
-        # 如果循环结束仍未成功
-        raise RuntimeError(f"Failed after {retries} retries: {last_err}")  # type: ignore
+                    resp = requests.post(
+                        url, headers=headers, files=files, data=data,
+                        timeout=(10, 60)
+                    )
+                    if resp.status_code == 413:
+                        raise RuntimeError("HTTP 413: Payload too large")
+                    resp.raise_for_status()
+                    jr = resp.json()
+                    return jr.get("text", "")
+                except (requests.exceptions.ConnectTimeout,
+                        requests.exceptions.ReadTimeout,
+                        requests.exceptions.ConnectionError) as e:
+                    last_err = e
+                    if attempt < retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                except requests.exceptions.RequestException as e:
+                    try:
+                        emsg = e.response.json()["error"]["message"]  # type: ignore
+                    except Exception:
+                        emsg = str(e)
+                    raise RuntimeError(f"API Request failed: {emsg}") from e
+            raise RuntimeError(f"Failed after {retries} retries: {last_err}")  # type: ignore
+
+        def _split_plan(file_size: int) -> List[Dict]:
+            # 计算每片起止字节（含重叠）
+            overlap = int(chunk_bytes * max(0.0, min(0.5, chunk_overlap_ratio)))
+            stride  = max(1, chunk_bytes - overlap)
+            chunks, start, idx = [], 0, 0
+            while start < file_size:
+                end = min(file_size, start + chunk_bytes)
+                chunks.append({"idx": idx, "start": start, "end": end})
+                idx   += 1
+                start += stride
+            return chunks
+
+        # ✅ 新增：可控的合并策略（是否启用去重）
+        def _smart_merge(prev_text: str, new_text: str,
+                        tail_win: int = 1000, head_win: int = 1000,
+                        min_overlap_chars: int = 60,
+                        min_overlap_ratio: float = 0.30,
+                        dedupe_enabled: bool = True) -> str:
+            # 没有上一段，直接返回
+            if not prev_text:
+                return new_text
+            # 未启用去重：直接拼接
+            if not dedupe_enabled:
+                return prev_text + new_text
+
+            # 启用去重：基于尾/头窗口检测重叠并消除
+            tail = prev_text[-tail_win:]
+            head = new_text[:head_win]
+            m = SequenceMatcher(None, tail, head, autojunk=False).find_longest_match(0, len(tail), 0, len(head))
+            if m and m.size > 0:
+                overlap_len = m.size
+                if overlap_len >= min_overlap_chars:
+                    ratio = overlap_len / max(1, min(len(tail), len(head)))
+                    if ratio >= min_overlap_ratio:
+                        return prev_text + new_text[m.b + m.size:]
+            return prev_text + new_text
+
+        file_size = os.path.getsize(file_path)
+        plan      = _split_plan(file_size)
+        total_n   = len(plan)
+        completed = 0
+
+        if progress_callback:
+            progress_callback(5.0)  # 5% 起步，切片准备中
+
+        merged = ""
+        tail_prompt = None
+
+        # ✅ 在这里根据 chunk_overlap_ratio 控制是否去重
+        dedupe_enabled = (chunk_overlap_ratio > 0.1)
+
+        with open(file_path, "rb") as f:
+            for ch in plan:
+                f.seek(ch["start"])
+                byts = f.read(ch["end"] - ch["start"])
+                name = f"{os.path.basename(file_path)}.part{ch['idx']:03d}.mp3"
+
+                part_text = _safe_post(name, byts)
+                merged    = _smart_merge(
+                    merged,
+                    part_text,
+                    dedupe_enabled=dedupe_enabled  # ✅ 只在 >0.1 时去重
+                )
+
+                # 更新下一片的 prompt 接力尾巴（限制长度防止过大）
+                tail_prompt = merged[-4000:] if merged else None
+
+                # 进度更新（5% -> 99%）
+                completed += 1
+                if progress_callback:
+                    p = 5.0 + 94.0 * (completed / max(1, total_n))
+                    progress_callback(min(99.0, p))
+
+        if progress_callback:
+            progress_callback(100.0)
+        return merged
 
     def _remove_gaps_between_blocks(self, blocks: List[Dict]) -> List[Dict]:
         if len(blocks) < 2:
@@ -455,19 +535,26 @@ class FasterWhisperProvider(TranscriptionProvider):
     
     
     
+    from itertools import tee
+
     def transcribe(self, **kwargs) -> Optional[str]:
-        input_audio = kwargs.get("input_audio")
-        model_name = kwargs.get("model_name", "base")
-        language = kwargs.get("language")
-        output_dir = kwargs.get("output_dir", ".")
+        input_audio   = kwargs.get("input_audio")
+        model_name    = kwargs.get("model_name", "base")
+        language      = kwargs.get("language")
+        output_dir    = kwargs.get("output_dir", ".")
         output_filename = kwargs.get("output_filename")
-        max_chars = kwargs.get("max_chars", 40)
-        batch_size = kwargs.get("batch_size", 4)
-        hotwords = kwargs.get("hotwords")
-        verbose = kwargs.get("verbose", True)
-        progress_callback = kwargs.get("progress_callback")
-        vad_filter = kwargs.get("vad_filter", False)
-        remove_gaps = kwargs.get("remove_gaps", False)
+        max_chars     = kwargs.get("max_chars", 40)
+        batch_size    = kwargs.get("batch_size", 4)
+        hotwords      = kwargs.get("hotwords")
+        verbose       = kwargs.get("verbose", True)
+        progress_cb   = kwargs.get("progress_callback")
+        vad_filter    = kwargs.get("vad_filter", False)
+        remove_gaps   = kwargs.get("remove_gaps", False)
+
+        # ---- 状态标记（用于最终用户可见总结）----
+        ai_correct_enabled = bool(items["AICorrectCheckBox"].Checked)
+        ai_correct_applied = False
+        ai_correct_reason  = ""   # 失败/回退原因，仅在失败时展示
 
         local_model_path = os.path.join(SCRIPT_PATH, "model", model_name)
         try:
@@ -475,10 +562,10 @@ class FasterWhisperProvider(TranscriptionProvider):
                 show_dynamic_message(f"Loading model '{model_name}' on CPU...", f"正在以 CPU 模式加载模型 '{model_name}'...")
             model = faster_whisper.WhisperModel(
                 local_model_path,
-                device="cpu",            # 关键：强制 CPU
-                compute_type="int8",     # 建议：CPU 上更省内存/更快；可换 "int8_float16"/"float32"
-                cpu_threads=max(1, (os.cpu_count() or 4) - 1),  # 预留 1 个线程给 UI
-                num_workers=1            # 适度；过多 worker 在 CPU 反而可能抖动
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=max(1, (os.cpu_count() or 4) - 1),
+                num_workers=1
             )
             pipeline = faster_whisper.BatchedInferencePipeline(model=model)
             if verbose:
@@ -489,66 +576,123 @@ class FasterWhisperProvider(TranscriptionProvider):
             return None
 
         transcribe_args = {
-            "beam_size": 5,                # 降一点束宽，CPU 更快
+            "beam_size": 5,
             "log_progress": True,
-            "batch_size": max(1, batch_size),  # CPU 下建议 1~2
+            "batch_size": max(1, batch_size),
             "word_timestamps": True,
             "hotwords": hotwords,
             "vad_filter": vad_filter
         }
         if language:
             transcribe_args["language"] = language
-        print(transcribe_args)
-        if verbose: 
+
+        if verbose:
             show_dynamic_message("[Whisper] Starting...", "[Whisper] 开始...")
+
+        # 1) 原始生成器
         segments_gen, info = pipeline.transcribe(input_audio, **transcribe_args)
-        if verbose: 
+
+        if verbose:
             show_dynamic_message(f"[Whisper] Language: {info.language}", f"[Whisper] 语言: {info.language}")
 
-        if progress_callback:
-            segments_gen = self._progress_reporter(segments_gen, info.duration, progress_callback)
-        if items["SmartCheckBox"].Checked:
+        # 2) 进度包装（在 tee 之前）
+        if progress_cb:
+            segments_gen = self._progress_reporter(segments_gen, info.duration, progress_cb)
+
+        # 3) 复制生成器，保证回退有“未消费”的分支可用
+        segments_for_tokens, segments_for_split = tee(segments_gen, 2)
+
+        # 4) Smart 模式（可选）
+        if ai_correct_enabled:
             show_dynamic_message(f"[Whisper] Smart optimization takes up more time...", f"[Whisper] 智能优化会占用更多时间...")
-            text = self._transcribe_audio(
-                file_path=input_audio,
-                api_key = kwargs.get("api_key",""),
-                base_url = kwargs.get("base_url", "https://api.openai.com/").rstrip('/'),
-                language=None,
-                hotwords=None,
-            )
-            gpt_tokens     = self._normalize_text(text, info.language)
-            #print("-------------DEBUG GPT TOKEN-------------")
-            #print(gpt_tokens)
-            #print("-------------DEBUG GPT TOKEN-------------\n")
-            whisper_tokens = self._collect_words(segments_gen, info.language)
-            #print("-------------DEBUG WHISPER TOKEN-------------")
-            #print(whisper_tokens)
-            #print("-------------DEBUG WHISPER TOKEN-------------\n")
-            segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
+
+            def _net_progress(pct: float):
+                show_dynamic_message(f"[Whisper] Refining... {pct:.1f}%",
+                                    f"[Whisper] 优化中... {pct:.1f}%")
+            try:
+                # 先把 Whisper 的逐词 token 收集出来（用 tokens 分支，避免消费 split 分支）
+                whisper_tokens = self._collect_words(segments_for_tokens, info.language)
+
+                # 在线 refine（分片上传+合并）
+                text = self._transcribe_audio(
+                    file_path = input_audio,
+                    api_key   = kwargs.get("api_key",""),
+                    base_url  = kwargs.get("base_url", "https://api.openai.com/").rstrip('/'),
+                    language  = None,
+                    hotwords  = None,
+                    progress_callback = _net_progress
+                )
+
+                # 判空即触发回退
+                if not text or not text.strip():
+                    raise RuntimeError("Empty online transcript")
+
+                gpt_tokens = self._normalize_text(text, info.language)
+                if not gpt_tokens:
+                    raise RuntimeError("Empty tokenized transcript")
+
+                # 基于匹配关系对齐时间
+                segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
+                ai_correct_applied = True
+                show_dynamic_message("[Whisper] AI Correct applied ✅",
+                                    "[Whisper] 字幕优化已应用 ✅")
+
+            except Exception as e:
+                # 记录失败原因，回退到本地
+                ai_correct_applied = False
+                ai_correct_reason  = str(e)[:160]  # 避免过长
+                print(f"[AI Correct Fallback] Online refine failed: {e}")
+                show_dynamic_message("[Whisper] AI Correct failed, falling back to local.",
+                                    "[Whisper] 智能优化失败，已回退为本地结果。")
+                segments_to_split = segments_for_split
         else:
-            segments_to_split = segments_gen
+            # 未开启 AI Correct：直接用未被消费的分支
+            segments_to_split = segments_for_split
+
+        # 5) CJK 语言下字符上限折半
         if info.language in ['zh', 'ja', 'th', 'lo', 'km', 'my', 'bo']:
             max_chars = max_chars / 2
-        
+
+        # 6) 分段
         subtitle_blocks = self._split_segments_by_max_chars(segments_to_split, int(max_chars))
-    
+
+        # 7) 去间隙（可选）
         if remove_gaps:
             subtitle_blocks = self._remove_gaps_between_blocks(subtitle_blocks)
-        
+
+        # 8) 去除中文内部空格
         for blk in subtitle_blocks:
             blk["text"] = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", blk["text"])
-        
+
+        # 9) 输出 SRT
         if not output_filename:
             base = os.path.splitext(os.path.basename(input_audio))[0]
             output_filename = f"{base}_whisper"
         os.makedirs(output_dir, exist_ok=True)
         srt_path = os.path.join(output_dir, f"{output_filename}.srt")
-        #print("-------------DEBUG FINAL TOKEN-------------")
+
+        # 调试
         print(subtitle_blocks)
-        #print("-------------DEBUG FINAL TOKEN-------------\n")
         self._write_srt(srt_path, subtitle_blocks)
 
-        if verbose: print(f"[Whisper] Generated SRT: {srt_path}")
+        # 10) 在函数内部给出“最终状态总结”，避免用户只看到外层统一的 ‘Finished! 100%’
+        if ai_correct_enabled:
+            if ai_correct_applied:
+                # 成功应用 AI Correct
+                show_dynamic_message("Done. AI Correct:  ✅",
+                                    "完成。字幕优化： ✅")
+            else:
+                # AI Correct 失败已回退，给出简明原因
+                en = "Done. AI Correct:  ❌  Reason: " + (ai_correct_reason or "unknown")
+                zh = "完成。字幕优化：❌  原因：" + (ai_correct_reason or "未知")
+                show_dynamic_message(en, zh)
+        else:
+            # 未启用 AI Correct
+            show_dynamic_message("Done.",
+                                "完成。")
+
+        if verbose:
+            print(f"[Whisper] Generated SRT: {srt_path}")
         return srt_path
 
 class OpenAIProvider(TranscriptionProvider):
@@ -854,7 +998,7 @@ whisper_win = dispatcher.AddWindow(
                 ]),
                 ui.HGroup({"Weight":0.1},[
                     #ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
-                    ui.CheckBox({"ID":"SmartCheckBox", "Text":"Smarter (beta)", "Checked":False, "Weight":0}),
+                    ui.CheckBox({"ID":"AICorrectCheckBox", "Text":"AI Correct (beta)", "Checked":False, "Weight":0}),
                     ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
                 ]),
                 
@@ -961,7 +1105,7 @@ translations = {
         "NoGapCheckBox":"字幕之间无间隙",
         "CopyrightButton":f"更多功能 © 2025 {SCRIPT_AUTHOR} 版权所有",
         "OnlineCheckBox": "使用 OpenAI API",
-        "SmartCheckBox": "AI字幕优化 (beta)",
+        "AICorrectCheckBox": "AI字幕优化 (beta)",
         "OpenAIFormatLabel":"填写 OpenAI Format API 信息",
         "OpenAIConfirm":"确定",
         "OpenAIRegisterButton":"注册",
@@ -977,7 +1121,7 @@ translations = {
         "MaxCharsLabel":"Max Chars", 
         "NoGapCheckBox":"No Gaps Between Subtitles",
         "OnlineCheckBox": "Use OpenAI API",
-        "SmartCheckBox": "AI Correct (beta)",
+        "AICorrectCheckBox": "AI Correct (beta)",
         "OpenAIFormatLabel":"OpenAI Format API",
         "OpenAIConfirm":"Confirm",
         "OpenAIRegisterButton":"Register",
@@ -992,9 +1136,9 @@ for lang_display_name in LANGUAGE_MAP.keys():
 
 def populate_models(use_openai):
     provider = openai_provider if use_openai else faster_whisper_provider
-    items["SmartCheckBox"].Enabled = not use_openai
+    items["AICorrectCheckBox"].Enabled = not use_openai
     items["DownloadButton"].Enabled = not use_openai
-    items["SmartCheckBox"].Checked = False
+    items["AICorrectCheckBox"].Checked = False
     if use_openai:
         openai_config_window.Show() 
     else:
@@ -1004,11 +1148,11 @@ def populate_models(use_openai):
         items["ModelCombo"].AddItem(model)
 
 def on_show_openai(ev):
-    if items["SmartCheckBox"].Checked:
+    if items["AICorrectCheckBox"].Checked:
         openai_config_window.Show()
     else:
         openai_config_window.Hide()
-whisper_win.On.SmartCheckBox.Clicked = on_show_openai
+whisper_win.On.AICorrectCheckBox.Clicked = on_show_openai
 
 def on_provider_switch(ev):
     populate_models(items["OnlineCheckBox"].Checked)
@@ -1064,7 +1208,7 @@ if saved_settings:
     items["NoGapCheckBox"].Checked = saved_settings.get("REMOVE_GAPS", DEFAULT_SETTINGS["REMOVE_GAPS"])
     items["LangCnCheckBox"].Checked = saved_settings.get("CN", DEFAULT_SETTINGS["CN"])
     items["LangEnCheckBox"].Checked = saved_settings.get("EN", DEFAULT_SETTINGS["EN"])
-    #items["SmartCheckBox"].Checked = saved_settings.get("SMART", DEFAULT_SETTINGS["SMART"])
+    #items["AICorrectCheckBox"].Checked = saved_settings.get("SMART", DEFAULT_SETTINGS["SMART"])
 if items["LangEnCheckBox"].Checked :
     switch_language("en")
 else:
@@ -1229,7 +1373,7 @@ def on_create_clicked(ev):
         
         if srt_path:
             import_srt_to_first_empty(srt_path)
-            show_dynamic_message("Finished! 100%", "转录完成！")
+            
         else:
             print("Failed to generate SRT. Provider might have failed.")
             if not use_openai:
@@ -1262,7 +1406,7 @@ def save_file():
         "MODEL": items["ModelCombo"].CurrentIndex,
         "LANGUAGE": items["LangCombo"].CurrentIndex,
         "MAX_CHARS": items["MaxChars"].Value,
-        "SMART":items["SmartCheckBox"].Checked,
+        "SMART":items["AICorrectCheckBox"].Checked,
         "REMOVE_GAPS": items["NoGapCheckBox"].Checked,
         "CN":items["LangCnCheckBox"].Checked,
         "EN":items["LangEnCheckBox"].Checked,
