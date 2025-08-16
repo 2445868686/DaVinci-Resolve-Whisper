@@ -87,6 +87,7 @@ DEFAULT_SETTINGS = {
     "LANGUAGE": 0,
     "MAX_CHARS": 42,
     "REMOVE_GAPS": False,
+    "TRIM_PUNCT": False, 
     "SMART":False,
     "CN":True,
     "EN":False,
@@ -663,6 +664,11 @@ class FasterWhisperProvider(TranscriptionProvider):
         # 8) 去除中文内部空格
         for blk in subtitle_blocks:
             blk["text"] = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", blk["text"])
+        
+        if items["TrimPunctCheckBox"].Checked:
+            TRAIL_PUNCT_RE = re.compile(r"[，。！？、；：,.!?;:…\s]+$")
+            for blk in subtitle_blocks:
+                blk["text"] = TRAIL_PUNCT_RE.sub("", blk["text"])
 
         # 9) 输出 SRT
         if not output_filename:
@@ -941,6 +947,11 @@ class OpenAIProvider(TranscriptionProvider):
             for blk in subtitle_blocks:
                 blk["text"] = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", blk["text"])
 
+            if items["TrimPunctCheckBox"].Checked:
+                TRAIL_PUNCT_RE = re.compile(r"[，。！？、；：,.!?;:…\s]+$")
+                for blk in subtitle_blocks:
+                    blk["text"] = TRAIL_PUNCT_RE.sub("", blk["text"])
+
             if not output_filename:
                 base = os.path.splitext(os.path.basename(input_audio))[0]
                 output_filename = f"{base}_openai"
@@ -999,23 +1010,29 @@ whisper_win = dispatcher.AddWindow(
                 ui.HGroup({"Weight":0.1},[
                     #ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
                     ui.CheckBox({"ID":"AICorrectCheckBox", "Text":"AI Correct (beta)", "Checked":False, "Weight":0}),
+                    ui.Label({"Text": ""}),
                     ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
                 ]),
                 
                 ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.1}),
-                    ui.ComboBox({"ID":"LangCombo","Weight":0.1}),
+                    ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.4}),
+                    ui.ComboBox({"ID":"LangCombo","Weight":0.6}),
+                ]),
+                ui.HGroup({"Weight":0.1},[
+                    ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.4}),
+                    ui.SpinBox({"ID": "MaxChars", "Minimum": 0, "Maximum": 100, "Value": 42, "SingleStep": 1, "Weight": 0.6}),
+                ]),
+                ui.HGroup({"Weight":0.1},[
+                    ui.CheckBox({"ID":"NoGapCheckBox", "Text":"No Gaps Between Subtitles", "Checked":False, "Weight":0}),
+                    ui.Label({"Text": ""}),
+                    ui.CheckBox({"ID":"TrimPunctCheckBox", "Text":"是否保留标点符号", "Checked":False, "Weight":0}),
                 ]),
                 
-                ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.1}),
-                    ui.SpinBox({"ID": "MaxChars", "Minimum": 0, "Maximum": 100, "Value": 42, "SingleStep": 1, "Weight": 0.1}),
-                ]),
-                ui.CheckBox({"ID":"NoGapCheckBox", "Text":"No Gaps Between Subtitles", "Checked":False, "Weight":0}),
                 ui.Button({"ID":"CreateButton","Text":"Create","Weight":0.15}),
                 ui.Label({"ID":"HotwordsLabel","Text":"Phrases / Prompt","Weight":0.1}),
                 ui.TextEdit({"ID":"Hotwords","Text":"","Weight":0.1}),
                 ui.HGroup({"Weight":0.1},[
+                    ui.Label({"Text": ""}),
                     ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
                     ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":0}),
                 ]),
@@ -1102,7 +1119,8 @@ translations = {
         "DownloadButton":"模型下载",
         "HotwordsLabel":"短语列表 / 提示", 
         "MaxCharsLabel":"每行最大字符", 
-        "NoGapCheckBox":"字幕之间无间隙",
+        "NoGapCheckBox":"字幕间无空隙",
+        "TrimPunctCheckBox":"删除句尾标点",
         "CopyrightButton":f"更多功能 © 2025 {SCRIPT_AUTHOR} 版权所有",
         "OnlineCheckBox": "使用 OpenAI API",
         "AICorrectCheckBox": "AI字幕优化 (beta)",
@@ -1119,7 +1137,8 @@ translations = {
         "CopyrightButton":f"More Features © 2025 by {SCRIPT_AUTHOR}",
         "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
-        "NoGapCheckBox":"No Gaps Between Subtitles",
+        "NoGapCheckBox":"No Gaps",
+        "TrimPunctCheckBox":"No End Punct.",
         "OnlineCheckBox": "Use OpenAI API",
         "AICorrectCheckBox": "AI Correct (beta)",
         "OpenAIFormatLabel":"OpenAI Format API",
@@ -1206,6 +1225,7 @@ if saved_settings:
     items["LangCombo"].CurrentIndex = saved_settings.get("LANGUAGE", DEFAULT_SETTINGS["LANGUAGE"])
     items["MaxChars"].Value = saved_settings.get("MAX_CHARS", DEFAULT_SETTINGS["MAX_CHARS"])
     items["NoGapCheckBox"].Checked = saved_settings.get("REMOVE_GAPS", DEFAULT_SETTINGS["REMOVE_GAPS"])
+    items["TrimPunctCheckBox"].Checked = saved_settings.get("TRIM_PUNCT", DEFAULT_SETTINGS["TRIM_PUNCT"])
     items["LangCnCheckBox"].Checked = saved_settings.get("CN", DEFAULT_SETTINGS["CN"])
     items["LangEnCheckBox"].Checked = saved_settings.get("EN", DEFAULT_SETTINGS["EN"])
     #items["AICorrectCheckBox"].Checked = saved_settings.get("SMART", DEFAULT_SETTINGS["SMART"])
@@ -1408,6 +1428,7 @@ def save_file():
         "MAX_CHARS": items["MaxChars"].Value,
         "SMART":items["AICorrectCheckBox"].Checked,
         "REMOVE_GAPS": items["NoGapCheckBox"].Checked,
+        "TRIM_PUNCT": items["TrimPunctCheckBox"].Checked,
         "CN":items["LangCnCheckBox"].Checked,
         "EN":items["LangEnCheckBox"].Checked,
     }
