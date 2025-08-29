@@ -1,9 +1,9 @@
 SCRIPT_NAME    = "DaVinci Whisper"
-SCRIPT_VERSION = " 1.0" # Updated version
+SCRIPT_VERSION = " 1.1" # Updated version
 SCRIPT_AUTHOR  = "HEIBA"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-WINDOW_WIDTH, WINDOW_HEIGHT = 300, 410
+WINDOW_WIDTH, WINDOW_HEIGHT = 325, 410
 X_CENTER = (SCREEN_WIDTH  - WINDOW_WIDTH ) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
@@ -289,8 +289,9 @@ class FasterWhisperProvider(TranscriptionProvider):
     # ---------- 3. _align_time ----------
     def _align_time(self, whisper_tokens: List[Dict], gpt_tokens: List[str]) -> Generator:
         from types import SimpleNamespace
-        A_cmp = [t["token"].lstrip() for t in whisper_tokens]
-        B_cmp = [b.lstrip() for b in gpt_tokens]
+        # Case-insensitive compare to improve robustness
+        A_cmp = [t["token"].lstrip().casefold() for t in whisper_tokens]
+        B_cmp = [b.lstrip().casefold() for b in gpt_tokens]
         matcher = SequenceMatcher(None, A_cmp, B_cmp, autojunk=False)
         mapping = {}
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -496,7 +497,6 @@ class FasterWhisperProvider(TranscriptionProvider):
             progress_callback(5.0)  # 5% 起步，切片准备中
 
         merged = ""
-        tail_prompt = None
 
         # ✅ 在这里根据 chunk_overlap_ratio 控制是否去重
         dedupe_enabled = (chunk_overlap_ratio > 0.1)
@@ -513,9 +513,6 @@ class FasterWhisperProvider(TranscriptionProvider):
                     part_text,
                     dedupe_enabled=dedupe_enabled  # ✅ 只在 >0.1 时去重
                 )
-
-                # 更新下一片的 prompt 接力尾巴（限制长度防止过大）
-                tail_prompt = merged[-4000:] if merged else None
 
                 # 进度更新（5% -> 99%）
                 completed += 1
@@ -535,8 +532,6 @@ class FasterWhisperProvider(TranscriptionProvider):
         return blocks
     
     
-    
-    from itertools import tee
 
     def transcribe(self, **kwargs) -> Optional[str]:
         input_audio   = kwargs.get("input_audio")
@@ -551,6 +546,7 @@ class FasterWhisperProvider(TranscriptionProvider):
         progress_cb   = kwargs.get("progress_callback")
         vad_filter    = kwargs.get("vad_filter", False)
         remove_gaps   = kwargs.get("remove_gaps", False)
+        match_text   = (kwargs.get("match_text") or "").strip()
 
         # ---- 状态标记（用于最终用户可见总结）----
         ai_correct_enabled = bool(items["AICorrectCheckBox"].Checked)
@@ -603,55 +599,77 @@ class FasterWhisperProvider(TranscriptionProvider):
         # 3) 复制生成器，保证回退有“未消费”的分支可用
         segments_for_tokens, segments_for_split = tee(segments_gen, 2)
 
-        # 4) Smart 模式（可选）
-        if ai_correct_enabled:
-            show_dynamic_message(f"[Whisper] Smart optimization takes up more time...", f"[Whisper] 智能优化会占用更多时间...")
-
-            def _net_progress(pct: float):
-                show_dynamic_message(f"[Whisper] Refining... {pct:.1f}%",
-                                    f"[Whisper] 优化中... {pct:.1f}%")
+        if match_text:
             try:
-                # 先把 Whisper 的逐词 token 收集出来（用 tokens 分支，避免消费 split 分支）
+                show_dynamic_message("[Whisper] Aligning with script...", "[Whisper] 正在按文稿对齐...")
+                # 收集 Whisper 的逐词 token（不消耗 split 分支）
                 whisper_tokens = self._collect_words(segments_for_tokens, info.language)
-
-                # 在线 refine（分片上传+合并）
-                text = self._transcribe_audio(
-                    file_path = input_audio,
-                    api_key   = kwargs.get("api_key",""),
-                    base_url  = kwargs.get("base_url", "https://api.openai.com/").rstrip('/'),
-                    language  = None,
-                    hotwords  = None,
-                    progress_callback = _net_progress
-                )
-
-                # 判空即触发回退
-                if not text or not text.strip():
-                    raise RuntimeError("Empty online transcript")
-
-                gpt_tokens = self._normalize_text(text, info.language)
-                if not gpt_tokens:
-                    raise RuntimeError("Empty tokenized transcript")
-
-                # 基于匹配关系对齐时间
-                segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
-                ai_correct_applied = True
-                show_dynamic_message("[Whisper] AI Correct applied ✅",
-                                    "[Whisper] 字幕优化已应用 ✅")
-
+                # 规范化用户文稿为 token
+                match_tokens   = self._normalize_text(match_text, info.language)
+                if not match_tokens:
+                    raise RuntimeError("Empty tokens from script text")
+                # 用你的统一对齐算法返回“带时间的 words 序列生成器”
+                segments_to_split = self._align_time(whisper_tokens, match_tokens)
             except Exception as e:
-                # 记录失败原因，回退到本地
-                ai_correct_applied = False
-                ai_correct_reason  = str(e)[:160]  # 避免过长
-                print(f"[AI Correct Fallback] Online refine failed: {e}")
-                show_dynamic_message("[Whisper] AI Correct failed, falling back to local.",
-                                    "[Whisper] 智能优化失败，已回退为本地结果。")
+                print(f"[Script Match Fallback] {e}")
+                show_dynamic_message("[Whisper] Script match failed, fallback to local result.",
+                                    "[Whisper] 文稿匹配失败，已回退为本地结果。")
                 segments_to_split = segments_for_split
         else:
-            # 未开启 AI Correct：直接用未被消费的分支
-            segments_to_split = segments_for_split
+            # 4) Smart 模式（可选）
+            if ai_correct_enabled:
+                show_dynamic_message(f"[Whisper] Smart optimization takes up more time...", f"[Whisper] 智能优化会占用更多时间...")
+
+                def _net_progress(pct: float):
+                    show_dynamic_message(f"[Whisper] Refining... {pct:.1f}%",
+                                        f"[Whisper] 优化中... {pct:.1f}%")
+                try:
+                    # 先把 Whisper 的逐词 token 收集出来（用 tokens 分支，避免消费 split 分支）
+                    whisper_tokens = self._collect_words(segments_for_tokens, info.language)
+
+                    # 缺少 API Key 时，直接回退避免无意义的联网尝试
+                    api_key_for_refine = kwargs.get("api_key", "")
+                    if not api_key_for_refine:
+                        raise RuntimeError("Missing API key")
+
+                    # 在线 refine（分片上传+合并）
+                    text = self._transcribe_audio(
+                        file_path = input_audio,
+                        api_key   = api_key_for_refine,
+                        base_url  = kwargs.get("base_url", "https://api.openai.com/").rstrip('/'),
+                        language  = None,
+                        hotwords  = None,
+                        progress_callback = _net_progress
+                    )
+
+                    # 判空即触发回退
+                    if not text or not text.strip():
+                        raise RuntimeError("Empty online transcript")
+
+                    gpt_tokens = self._normalize_text(text, info.language)
+                    if not gpt_tokens:
+                        raise RuntimeError("Empty tokenized transcript")
+
+                    # 基于匹配关系对齐时间
+                    segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
+                    ai_correct_applied = True
+                    show_dynamic_message("[Whisper] AI Correct applied ✅",
+                                        "[Whisper] 字幕优化已应用 ✅")
+
+                except Exception as e:
+                    # 记录失败原因，回退到本地
+                    ai_correct_applied = False
+                    ai_correct_reason  = str(e)[:160]  # 避免过长
+                    print(f"[AI Correct Fallback] Online refine failed: {e}")
+                    show_dynamic_message("[Whisper] AI Correct failed, falling back to local.",
+                                        "[Whisper] 智能优化失败，已回退为本地结果。")
+                    segments_to_split = segments_for_split
+            else:
+                # 未开启 AI Correct：直接用未被消费的分支
+                segments_to_split = segments_for_split
 
         # 5) CJK 语言下字符上限折半
-        if info.language in ['zh', 'ja', 'th', 'lo', 'km', 'my', 'bo']:
+        if info.language in self.CJK_LANGS:
             max_chars = max_chars / 2
 
         # 6) 分段
@@ -723,7 +741,7 @@ class OpenAIProvider(TranscriptionProvider):
         'tibetan': 'bo',
     }
     def get_available_models(self) -> List[str]:
-        return ["whisper-1","gpt-4o-transcribe","gpt-4o-mini-transcribe"]
+        return ["whisper-1"]
 
     def _format_srt_time(self, seconds: float) -> str:
         """Formats seconds into SRT time format HH:MM:SS,ms"""
@@ -1000,18 +1018,19 @@ whisper_win = dispatcher.AddWindow(
                 ui.Label({"ID":"TitleLabel","Text":"Create subtitles from audio","Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
                 
                 ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.1}),
-                    ui.ComboBox({"ID":"ModelCombo","Weight":0.1}),                    
+                    ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.5}),
+                    ui.ComboBox({"ID":"ModelCombo","Weight":0.4}),  
+                    ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0.1}),          
                 ]),
                 ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
-                    ui.Button({"ID":"DownloadButton","Text":"Download Model","Weight":0}),
+                    #ui.Label({"ID":"BlankLabel","Text":"","Weight":0.5}),
+                    ui.Button({"ID":"DownloadButton","Text":"Download Model","Weight":1}),               
                 ]),
                 ui.HGroup({"Weight":0.1},[
                     #ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
-                    ui.CheckBox({"ID":"AICorrectCheckBox", "Text":"AI Correct (beta)", "Checked":False, "Weight":0}),
+                    ui.CheckBox({"ID":"MatchTextCheckBox", "Text":"文稿匹配", "Checked":False, "Weight":0}),
                     ui.Label({"Text": ""}),
-                    ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
+                    ui.CheckBox({"ID":"AICorrectCheckBox", "Text":"AI Correct (beta)", "Checked":False, "Weight":0}),
                 ]),
                 
                 ui.HGroup({"Weight":0.1},[
@@ -1099,6 +1118,27 @@ openai_config_window = dispatcher.AddWindow(
         )
     ]
 )
+match_window = dispatcher.AddWindow(
+    {
+        "ID": "ScriptMatchWin",
+        "WindowTitle": "文稿匹配",
+        "Geometry": [900, 380, 520, 360],
+        "Hidden": True,
+        "StyleSheet": "*{font-size:14px;}"
+    },
+    [
+        ui.VGroup([
+            ui.Label({"ID":"MatchInfoLabel","Text":"请在下方粘贴完整文稿（将按该文本对齐 Whisper 时间轴）：",
+                      "Alignment":{"AlignHCenter": True, "AlignVCenter": True},"Weight":0.2,'WordWrap': True}),
+            ui.TextEdit({"ID":"MatchTextEdit","Text":"","PlaceholderText":"","Weight":1}),
+            ui.HGroup({"Weight":0},[
+                ui.Button({"ID":"MatchConfirmBtn","Text":"确定","Weight":1}),
+                ui.Button({"ID":"MatchCancelBtn","Text":"取消","Weight":1}),
+            ])
+        ])
+    ]
+)
+
 def show_dynamic_message(en_text, zh_text):
     use_en = items["LangEnCheckBox"].Checked
     msg = en_text if use_en else zh_text
@@ -1121,8 +1161,13 @@ translations = {
         "MaxCharsLabel":"每行最大字符", 
         "NoGapCheckBox":"字幕间无空隙",
         "TrimPunctCheckBox":"删除句尾标点",
+        "MatchTextCheckBox":"文稿匹配",
+        "MatchInfoLabel":"请在下方粘贴完整文稿（将按该文本对齐）：",
+        #"MatchTextEdit":"在此粘贴全文...",
+        "MatchConfirmBtn":"确定",
+        "MatchCancelBtn":"取消",
         "CopyrightButton":f"更多功能 © 2025 {SCRIPT_AUTHOR} 版权所有",
-        "OnlineCheckBox": "使用 OpenAI API",
+        "OnlineCheckBox": "使用 API",
         "AICorrectCheckBox": "AI字幕优化 (beta)",
         "OpenAIFormatLabel":"填写 OpenAI Format API 信息",
         "OpenAIConfirm":"确定",
@@ -1134,22 +1179,28 @@ translations = {
         "ModelLabel":"Model", 
         "DownloadButton":"Download Model",
         "CreateButton":"Create", 
+        "MatchTextCheckBox":"Match Text",
+        "MatchInfoLabel":"Please paste the full document below (it will be aligned to this text):",
+        #"MatchTextEdit":"Paste the full text here...",
+        "MatchConfirmBtn":"Confirm",
+        "MatchCancelBtn":"Cancel",
         "CopyrightButton":f"More Features © 2025 by {SCRIPT_AUTHOR}",
         "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
         "NoGapCheckBox":"No Gaps",
         "TrimPunctCheckBox":"No End Punct.",
-        "OnlineCheckBox": "Use OpenAI API",
+        "OnlineCheckBox": "Use API",
         "AICorrectCheckBox": "AI Correct (beta)",
         "OpenAIFormatLabel":"OpenAI Format API",
         "OpenAIConfirm":"Confirm",
         "OpenAIRegisterButton":"Register",
         }
 }
-
+""
 items = whisper_win.GetItems()
 msg_items = msgbox.GetItems()
 openai_items = openai_config_window.GetItems()
+match_items = match_window.GetItems()
 for lang_display_name in LANGUAGE_MAP.keys():
     items["LangCombo"].AddItem(lang_display_name)
 
@@ -1166,12 +1217,45 @@ def populate_models(use_openai):
     for model in provider.get_available_models():
         items["ModelCombo"].AddItem(model)
 
-def on_show_openai(ev):
-    if items["AICorrectCheckBox"].Checked:
+def on_ai_correct_clicked(ev):
+    checked = items["AICorrectCheckBox"].Checked
+    if checked:
+        items["MatchTextCheckBox"].Checked = False
+        items["MatchTextCheckBox"].Enabled = False
         openai_config_window.Show()
+        match_window.Hide()
     else:
+        items["MatchTextCheckBox"].Enabled = True
         openai_config_window.Hide()
-whisper_win.On.AICorrectCheckBox.Clicked = on_show_openai
+
+whisper_win.On.AICorrectCheckBox.Clicked = on_ai_correct_clicked
+
+def on_match_checkbox_clicked(ev):
+    checked = items["MatchTextCheckBox"].Checked
+    if checked:
+        # 勾选文稿匹配 -> 取消并禁用 AI Correct，弹窗输入文稿
+        items["AICorrectCheckBox"].Checked = False
+        items["AICorrectCheckBox"].Enabled = False
+        match_window.Show()
+    else:
+        # 取消勾选 -> 恢复 AI Correct 的可用
+        items["AICorrectCheckBox"].Enabled = True
+        match_window.Hide()
+
+whisper_win.On.MatchTextCheckBox.Clicked = on_match_checkbox_clicked
+
+def on_match_confirm(ev):
+    match_window.Hide()  # 保持“文稿匹配”勾选状态不变
+
+def on_match_cancel(ev):
+    # 取消则恢复现场：撤销勾选、恢复 AI Correct
+    items["MatchTextCheckBox"].Checked = False
+    items["AICorrectCheckBox"].Enabled = True
+    match_window.Hide()
+
+match_window.On.MatchConfirmBtn.Clicked = on_match_confirm
+match_window.On.MatchCancelBtn.Clicked  = on_match_cancel
+match_window.On.ScriptMatchWin.Close    = on_match_cancel
 
 def on_provider_switch(ev):
     populate_models(items["OnlineCheckBox"].Checked)
@@ -1184,6 +1268,8 @@ def switch_language(lang):
             items[item_id].Text = text_value
         elif item_id in openai_items:    
             openai_items[item_id].Text = text_value
+        elif item_id in match_items:   
+            match_items[item_id].Text = text_value
         else:
             print(f"[Warning] No control with ID {item_id} exists in items, so the text cannot be set!")
 
@@ -1233,6 +1319,9 @@ if items["LangEnCheckBox"].Checked :
     switch_language("en")
 else:
     switch_language("cn")
+
+items["OnlineCheckBox"].Enabled=False
+
 def import_srt_to_first_empty(path):
     resolve, current_project, current_media_pool, current_root_folder, current_timeline, fps = connect_resolve()
     if not current_timeline:
@@ -1369,6 +1458,7 @@ def on_create_clicked(ev):
         
         # Determine which provider to use
         use_openai = items["OnlineCheckBox"].Checked
+        match_enabled = items["MatchTextCheckBox"].Checked
         provider = openai_provider if use_openai else faster_whisper_provider
 
         transcribe_params = {
@@ -1384,7 +1474,9 @@ def on_create_clicked(ev):
             "progress_callback": update_transcribe_progress,
             "remove_gaps": items["NoGapCheckBox"].Checked
         }
-        
+        transcribe_params.update({
+            "match_text": match_items["MatchTextEdit"].PlainText if match_enabled else None
+        })
         # Add provider-specific parameters
         if not use_openai:
             transcribe_params.update({"batch_size": 4, "vad_filter": True})

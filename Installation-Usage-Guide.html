@@ -250,13 +250,14 @@ ul {
                 <li><a href="#ui-zh-1">1. 模型</a></li>
                 <li><a href="#ui-zh-2">2. 模型下载</a></li>
                 <li><a href="#ui-zh-3">3. 使用 OpenAI API</a></li>
-                <li><a href="#ui-zh-4">4. AI 字幕优化</a></li>
-                <li><a href="#ui-zh-5">5. 语言</a></li>
-                <li><a href="#ui-zh-6">6. 每行最大字符</a></li>
-                <li><a href="#ui-zh-7">7. 字幕间无空隙</a></li>
-                <li><a href="#ui-zh-8">8. 删除句尾标点</a></li>
-                <li><a href="#ui-zh-9">9. 短语列表 / 提示</a></li>
-                <li><a href="#ui-zh-10">10. 创建</a></li>
+                <li><a href="#ui-zh-4">4. 文稿匹配</a></li>
+                <li><a href="#ui-zh-5">5. AI 字幕优化</a></li>
+                <li><a href="#ui-zh-6">6. 语言</a></li>
+                <li><a href="#ui-zh-7">7. 每行最大字符</a></li>
+                <li><a href="#ui-zh-8">8. 字幕间无空隙</a></li>
+                <li><a href="#ui-zh-9">9. 删除句尾标点</a></li>
+                <li><a href="#ui-zh-10">10. 短语列表 / 提示</a></li>
+                <li><a href="#ui-zh-11">11. 创建</a></li>
               </ul>
             </li>
             <li><a href="#api-config-zh">二、OpenAI API 配置</a></li>
@@ -362,7 +363,19 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-4">4. AI 字幕优化</button>
+          <!-- Moved up: 文稿匹配 now No.4 -->
+          <button type="button" class="collapsible" id="ui-zh-4">4. 文稿匹配</button>
+          <div class="collapsible-content">
+            <ul>
+              <li><strong>功能</strong>：将转录结果与您提供的完整“文稿/台本”进行匹配与对齐，优先使用文稿文本，同时沿用 Whisper 的精确时间轴生成字幕。</li>
+              <li><strong>使用方法</strong>：勾选“文稿匹配”后，会弹出窗口；将全文粘贴进去并点击“确定”，然后点击“创建”生成字幕。</li>
+              <li><strong>适用场景</strong>：有正式稿件/提词文案/会议纪要等，需要字幕与文稿严格一致的场景。</li>
+              <li><strong>兼容性</strong>：与“AI 字幕优化”互斥（二者不可同时启用）；推荐在本地模型模式下使用。</li>
+              <li><strong>注意</strong>：请尽量使用与音频相同语言的全文，并去除多余排版符号；若对齐失败，插件会自动回退为本地识别结果。</li>
+            </ul>
+          </div>
+
+          <button type="button" class="collapsible" id="ui-zh-5">5. AI 字幕优化</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：一个高级的混合模式，仅在<strong>不使用</strong>“OpenAI API”时可用。</li>
@@ -371,7 +384,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-5">5. 语言</button>
+          <button type="button" class="collapsible" id="ui-zh-6">6. 语言</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：指定视频中的主要语言。</li>
@@ -384,7 +397,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-6">6. 每行最大字符</button>
+          <button type="button" class="collapsible" id="ui-zh-7">7. 每行最大字符</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：设置每条字幕显示的最大字符数。默认值为 42。插件会根据这个限制自动将长句切分为多行。</li>
@@ -392,21 +405,21 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-7">7. 字幕间无空隙</button>
+          <button type="button" class="collapsible" id="ui-zh-8">8. 字幕间无空隙</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：勾选后，插件会自动调整字幕的时间码，使上一条字幕的结束时间与下一条字幕的开始时间无缝衔接，实现字幕的连续显示。</li>
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-8">8. 删除句尾标点</button>
+          <button type="button" class="collapsible" id="ui-zh-9">9. 删除句尾标点</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：勾选后，会自动移除每条字幕末尾的逗号、句号、问号等标点符号。</li>
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-9">9. 短语列表 / 提示</button>
+          <button type="button" class="collapsible" id="ui-zh-10">10. 短语列表 / 提示</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：这是一个非常实用的功能。您可以在此文本框中输入一些视频中频繁出现的专有名词、人名、品牌或特定术语（用逗号或空格隔开）。</li>
@@ -414,7 +427,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-10">10. 创建</button>
+          <button type="button" class="collapsible" id="ui-zh-11">11. 创建</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：这是启动所有操作的核心按钮。</li>
@@ -428,6 +441,8 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
               </li>
             </ul>
           </div>
+
+          <!-- (original 文稿匹配 block moved above) -->
         </section>
 
         <section id="api-config-zh">
@@ -506,13 +521,14 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
                 <li><a href="#ui-en-1">1. Model</a></li>
                 <li><a href="#ui-en-2">2. Download Model</a></li>
                 <li><a href="#ui-en-3">3. Use OpenAI API</a></li>
-                <li><a href="#ui-en-4">4. AI Correct (beta)</a></li>
-                <li><a href="#ui-en-5">5. Language</a></li>
-                <li><a href="#ui-en-6">6. Max Chars</a></li>
-                <li><a href="#ui-en-7">7. No Gaps Between Subtitles</a></li>
-                <li><a href="#ui-en-8">8. No End Punct.</a></li>
-                <li><a href="#ui-en-9">9. Phrases / Prompt</a></li>
-                <li><a href="#ui-en-10">10. Create</a></li>
+                <li><a href="#ui-en-4">4. Match Text</a></li>
+                <li><a href="#ui-en-5">5. AI Correct (beta)</a></li>
+                <li><a href="#ui-en-6">6. Language</a></li>
+                <li><a href="#ui-en-7">7. Max Chars</a></li>
+                <li><a href="#ui-en-8">8. No Gaps</a></li>
+                <li><a href="#ui-en-9">9. No End Punct.</a></li>
+                <li><a href="#ui-en-10">10. Phrases / Prompt</a></li>
+                <li><a href="#ui-en-11">11. Create</a></li>
               </ul>
             </li>
             <li><a href="#api-config-en">II. OpenAI API Config</a></li>
@@ -622,7 +638,19 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-4">4. AI Correct (beta)</button>
+          <!-- Moved up: Match Text now No.4 -->
+          <button type="button" class="collapsible" id="ui-en-4">4. Match Text</button>
+          <div class="collapsible-content">
+            <ul>
+              <li><strong>Function</strong>: Aligns the transcription with a full script you provide, using your script text for subtitles while preserving Whisper’s precise timing.</li>
+              <li><strong>How to use</strong>: Check “Match Text”, paste the complete script in the popup and click “Confirm”, then click “Create”.</li>
+              <li><strong>Best for</strong>: Voice-overs, speeches, meetings, or any case where subtitles should strictly follow a prepared script.</li>
+              <li><strong>Compatibility</strong>: Mutually exclusive with “AI Correct (beta)” and recommended with local models.</li>
+              <li><strong>Notes</strong>: Use the full script in the same language as the audio and remove extra formatting; if alignment fails, it falls back to the local recognition result.</li>
+            </ul>
+          </div>
+
+          <button type="button" class="collapsible" id="ui-en-5">5. AI Correct (beta)</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: An advanced hybrid mode, available only when <strong>not</strong> using the "Use OpenAI API" option.</li>
@@ -631,7 +659,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-5">5. Language</button>
+          <button type="button" class="collapsible" id="ui-en-6">6. Language</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: Specify the primary language in the video.</li>
@@ -644,7 +672,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-6">6. Max Chars</button>
+          <button type="button" class="collapsible" id="ui-en-7">7. Max Chars</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: Sets the maximum number of characters per subtitle line. The default is 42. The plugin automatically splits long sentences based on this limit.</li>
@@ -652,21 +680,21 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-7">7. No Gaps</button>
+          <button type="button" class="collapsible" id="ui-en-8">8. No Gaps</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: When checked, the plugin adjusts subtitle timecodes to eliminate gaps, making the end time of one subtitle seamless with the start time of the next for continuous display.</li>
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-8">8. No End Punct. </button>
+          <button type="button" class="collapsible" id="ui-en-9">9. No End Punct. </button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: When checked, it automatically removes trailing punctuation like commas, periods, and question marks from the end of each subtitle line.</li>
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-9">9. Phrases / Prompt</button>
+          <button type="button" class="collapsible" id="ui-en-10">10. Phrases / Prompt</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: A very useful feature. You can enter frequently occurring proper nouns, names, brands, or specific terms (separated by commas or spaces) in this text box.</li>
@@ -674,7 +702,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-en-10">10. Create</button>
+          <button type="button" class="collapsible" id="ui-en-11">11. Create</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>Function</strong>: The core button that initiates all operations.</li>
@@ -688,6 +716,8 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
               </li>
             </ul>
           </div>
+
+          <!-- (original Match Text block moved above) -->
         </section>
 
         <section id="api-config-en">

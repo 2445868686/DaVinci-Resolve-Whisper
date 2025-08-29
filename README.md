@@ -64,6 +64,7 @@ A powerful script for DaVinci Resolve that integrates the Whisper speech-to-text
     -   **No Gaps**: Check this to make each subtitle start exactly when the previous one ends.
     -   **Phrases / Prompt**: Enter any specific words, names, or phrases (separated by commas) that you want the model to recognize more accurately.
 
+
 ## Support
 
 🚀 **Passionate about open-source and AI innovation?** This project is dedicated to making AI-powered tools more **practical** and **accessible**. All software is **completely free** and **open-source**, created to give back to the community!  
@@ -71,5 +72,3 @@ A powerful script for DaVinci Resolve that integrates the Whisper speech-to-text
 If you find this project helpful, consider supporting my work! Your support helps me continue development and bring even more exciting features to life! 💡✨  
 
  [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G31A6SQU)  
-
-
