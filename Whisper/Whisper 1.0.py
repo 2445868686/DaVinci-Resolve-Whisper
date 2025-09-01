@@ -61,6 +61,7 @@ import shutil
 import glob
 import re
 import io
+import threading
 import json
 from itertools import tee
 from difflib import SequenceMatcher
@@ -117,6 +118,24 @@ loading_win = dispatcher.AddWindow(
     ]
 )
 loading_win.Show()
+
+# ===== Loading label elapsed-time updater =====
+_loading_items = loading_win.GetItems()
+_loading_start_ts = time.time()
+_loading_timer_stop = False
+
+def _loading_timer_worker():
+    # Update once per second until stopped
+    while not _loading_timer_stop:
+        try:
+            elapsed = int(time.time() - _loading_start_ts)
+            _loading_items["LoadLabel"].Text = f"Please wait , loading... \n( {elapsed}s elapsed )"
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+_loading_timer_thread = threading.Thread(target=_loading_timer_worker, daemon=True)
+_loading_timer_thread.start()
 
 # ================== DaVinci Resolve Connection ==================
 try:
@@ -213,6 +232,11 @@ class FasterWhisperProvider(TranscriptionProvider):
     def get_available_models(self) -> List[str]:
         return ["tiny", "small", "base", "medium", "large-v3"]
 
+    # 当脚本文本与 Whisper 结果完全不匹配时触发回退
+    # 说明：这里采用“覆盖率阈值”来判定是否回退；默认阈值为 0.0，
+    # 即只有在完全 0 覆盖（无任何有效 token 匹配）时才回退。
+    SCRIPT_MATCH_MIN_COVERAGE = 0.0
+
     # 逐字分词的语言集合
     CJK_LANGS = {"zh", "ja", "ko", "th", "lo", "km", "my", "bo"}
 
@@ -285,6 +309,24 @@ class FasterWhisperProvider(TranscriptionProvider):
                     for tk in self._WHISPER_NON_CJK_SPLIT.findall(w.word.lstrip()):
                         tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
         return tokens
+
+    # ---------- 6.1 计算“有效 token”覆盖率（用于回退判定） ----------
+    def _is_meaningful_token(self, tok: str) -> bool:
+        """过滤掉纯标点/空白，仅保留包含字母/数字/各主要文字脚本的 token。"""
+        return bool(re_u.search(
+            r"\p{L}|\p{Nd}|\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}|\p{Thai}|\p{Lao}|\p{Khmer}|\p{Myanmar}|\p{Tibetan}",
+            tok
+        ))
+
+    def _token_match_coverage(self, whisper_tokens: List[Dict], match_tokens: List[str]) -> float:
+        """计算匹配覆盖率：等价片段数 / 较短序列长度（均只计入“有效 token”）。"""
+        A = [t["token"].lstrip().casefold() for t in whisper_tokens if self._is_meaningful_token(t["token"])]
+        B = [b.lstrip().casefold() for b in match_tokens if self._is_meaningful_token(b)]
+        if not A or not B:
+            return 0.0
+        m = SequenceMatcher(None, A, B, autojunk=False)
+        equal_count = sum((i2 - i1) for tag, i1, i2, j1, j2 in m.get_opcodes() if tag == "equal")
+        return equal_count / max(1, min(len(A), len(B)))
 
     # ---------- 3. _align_time ----------
     def _align_time(self, whisper_tokens: List[Dict], gpt_tokens: List[str]) -> Generator:
@@ -608,6 +650,10 @@ class FasterWhisperProvider(TranscriptionProvider):
                 match_tokens   = self._normalize_text(match_text, info.language)
                 if not match_tokens:
                     raise RuntimeError("Empty tokens from script text")
+                # 覆盖率判定：当完全不匹配（或低于阈值）时，触发回退
+                coverage = self._token_match_coverage(whisper_tokens, match_tokens)
+                if coverage <= self.SCRIPT_MATCH_MIN_COVERAGE:
+                    raise RuntimeError(f"Script/audio zero-coverage: {coverage:.3f}")
                 # 用你的统一对齐算法返回“带时间的 words 序列生成器”
                 segments_to_split = self._align_time(whisper_tokens, match_tokens)
             except Exception as e:
@@ -1547,6 +1593,7 @@ def on_close(ev):
     dispatcher.ExitLoop()
 whisper_win.On.WhisperWin.Close = on_close
 
+_loading_timer_stop = True
 loading_win.Hide() 
 whisper_win.Show()
 dispatcher.RunLoop()
