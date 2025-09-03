@@ -3,7 +3,7 @@ SCRIPT_VERSION = " 1.1" # Updated version
 SCRIPT_AUTHOR  = "HEIBA"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-WINDOW_WIDTH, WINDOW_HEIGHT = 325, 410
+WINDOW_WIDTH, WINDOW_HEIGHT = 700, 410
 X_CENTER = (SCREEN_WIDTH  - WINDOW_WIDTH ) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
@@ -56,10 +56,12 @@ import platform
 import sys
 import random
 import webbrowser
+import subprocess
 import string
 import shutil
 import glob
 import re
+import unicodedata
 import io
 import threading
 import json
@@ -274,7 +276,36 @@ class FasterWhisperProvider(TranscriptionProvider):
         rf"|[.,!?…;:，。？！；：{_SYM_CLASS[1:-1]}])",
         flags=re_u.VERSION1
     )
+    _CJK_ANY_RE = re_u.compile(
+        r"\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}|\p{Thai}|\p{Lao}|\p{Khmer}|\p{Myanmar}|\p{Tibetan}",
+        flags=re_u.VERSION1
+    )
+    _PUNCTS_RIGHT_ATTACH = set(list(".,?!…;:，。？！；：)]}»、」』》"))
+    _PUNCTS_LEFT_ATTACH  = set(list("([{«「『《"))
+    _QUOTES              = set(['"', "'", "“", "”", "‘", "’"])
+    def _is_cjk_token(self, s: str) -> bool:
+        return bool(self._CJK_ANY_RE.search(s))
 
+    def _should_joiner(self, prev_tok: str, cur_tok: str) -> str:
+        """
+        返回前缀连接符："" 或 " "
+        规则：
+        - 标点（右侧附着，如 , . ! ? … 等）前不加空格
+        - 左括号/开引号后不加空格
+        - CJK↔CJK 不加空格
+        - 其它情况默认加一个空格（含 CJK↔非CJK），避免“全粘在一起”
+        """
+        if not prev_tok:
+            return ""
+        if cur_tok in self._PUNCTS_RIGHT_ATTACH or cur_tok in self._QUOTES and cur_tok in ('"', "”", "’"):
+            return ""
+        if prev_tok in self._PUNCTS_LEFT_ATTACH or prev_tok in self._QUOTES and prev_tok in ('"', "“", "‘"):
+            return ""
+        prev_is_cjk = self._is_cjk_token(prev_tok)
+        cur_is_cjk  = self._is_cjk_token(cur_tok)
+        if prev_is_cjk and cur_is_cjk:
+            return ""
+        return " "
     # ---------- 4. 辅助方法 ----------
     @staticmethod
     def _insert_boundary_spaces(text: str) -> str:
@@ -287,14 +318,55 @@ class FasterWhisperProvider(TranscriptionProvider):
         return re_u.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
 
     # ---------- 5. _normalize_text ----------
+    
     def _normalize_text(self, text: str, language: Optional[str]) -> List[str]:
-        text = self._preprocess_camel_case(text.strip())
+        # 1) 统一到 NFKC，拉直全角/兼容字符
+        text = unicodedata.normalize("NFKC", (text or "").strip())
+        # 2) 聪明引号/破折号 ↦ ASCII
+        text = (text
+                .replace("\u2019", "'")   # ’ -> '
+                .replace("\u2018", "'")   # ‘ -> '
+                .replace("\u201C", '"')   # “ -> "
+                .replace("\u201D", '"')   # ” -> "
+                .replace("\u2013", "-")   # – -> -
+                .replace("\u2014", "-"))  # — -> -
+
+        # 3) 你原有的预处理
+        text = self._preprocess_camel_case(text)   # "DaVinci" -> "Da Vinci"
         text = re_u.sub(r"\s+", " ", text)
+
         if language in self.CJK_LANGS:
             text = self._insert_boundary_spaces(text)
-            return self._CJK_PATTERN.findall(text)
-        return [tk for tk in self._NON_CJK_PATTERN.findall(text) if tk.strip()]
+            tokens = self._CJK_PATTERN.findall(text)
+        else:
+            tokens = [tk for tk in self._NON_CJK_PATTERN.findall(text) if tk.strip()]
 
+        # 4) **去掉你 findall 带来的前导空格**
+        return [t.lstrip() for t in tokens if t.strip()]
+    def _coalesce_hyphen_tokens(self, tokens: List[Dict]) -> List[Dict]:
+        """
+        将 ['sub','-','title'] 合并为 ['sub-title']，并贯通时间。
+        合并条件：中间 token 恰为 '-'，且三者相邻；允许 0.02s 微小间隙。
+        """
+        if not tokens:
+            return tokens
+        merged = []
+        i = 0
+        while i < len(tokens):
+            if (i + 2 < len(tokens)
+                and tokens[i+1]["token"] == "-"
+                and tokens[i]["end"] >= tokens[i+1]["start"] - 0.02
+                and tokens[i+2]["start"] <= tokens[i+1]["end"] + 0.02):
+                merged.append({
+                    "token": tokens[i]["token"] + "-" + tokens[i+2]["token"],
+                    "start": tokens[i]["start"],
+                    "end"  : tokens[i+2]["end"],
+                })
+                i += 3
+            else:
+                merged.append(tokens[i])
+                i += 1
+        return merged
     # ---------- 6. _collect_words ----------
     def _collect_words(self, segments_gen, language: Optional[str]) -> List[Dict]:
         tokens: List[Dict] = []
@@ -308,6 +380,7 @@ class FasterWhisperProvider(TranscriptionProvider):
                 else:
                     for tk in self._WHISPER_NON_CJK_SPLIT.findall(w.word.lstrip()):
                         tokens.append({"token": tk, "start": float(w.start), "end": float(w.end)})
+        tokens = self._coalesce_hyphen_tokens(tokens)
         return tokens
 
     # ---------- 6.1 计算“有效 token”覆盖率（用于回退判定） ----------
@@ -317,16 +390,6 @@ class FasterWhisperProvider(TranscriptionProvider):
             r"\p{L}|\p{Nd}|\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}|\p{Thai}|\p{Lao}|\p{Khmer}|\p{Myanmar}|\p{Tibetan}",
             tok
         ))
-
-    def _token_match_coverage(self, whisper_tokens: List[Dict], match_tokens: List[str]) -> float:
-        """计算匹配覆盖率：等价片段数 / 较短序列长度（均只计入“有效 token”）。"""
-        A = [t["token"].lstrip().casefold() for t in whisper_tokens if self._is_meaningful_token(t["token"])]
-        B = [b.lstrip().casefold() for b in match_tokens if self._is_meaningful_token(b)]
-        if not A or not B:
-            return 0.0
-        m = SequenceMatcher(None, A, B, autojunk=False)
-        equal_count = sum((i2 - i1) for tag, i1, i2, j1, j2 in m.get_opcodes() if tag == "equal")
-        return equal_count / max(1, min(len(A), len(B)))
 
     # ---------- 3. _align_time ----------
     def _align_time(self, whisper_tokens: List[Dict], gpt_tokens: List[str]) -> Generator:
@@ -343,6 +406,7 @@ class FasterWhisperProvider(TranscriptionProvider):
 
         aligned, B_keys = [], sorted(mapping.keys())
         for j, tok in enumerate(gpt_tokens):
+            tok_clean = tok.lstrip()
             if j in mapping:
                 w = whisper_tokens[mapping[j]]
                 start, end = w["start"], w["end"]
@@ -360,7 +424,7 @@ class FasterWhisperProvider(TranscriptionProvider):
                 else:
                     start = 0.0
                 end = start + 0.05
-            aligned.append({"word": tok, "start": start, "end": end})
+            aligned.append({"word": tok_clean, "start": start, "end": end})
             
         if aligned and whisper_tokens:
             last_whisper_token_end = whisper_tokens[-1]["end"]
@@ -380,40 +444,55 @@ class FasterWhisperProvider(TranscriptionProvider):
         def finalize_and_reset_block():
             nonlocal current_block
             if current_block["text"]:
+                current_block["text"] = current_block["text"].strip()
                 subtitle_blocks.append(current_block)
             current_block = {"start": 0, "end": 0, "text": ""}
 
+        prev_tok_for_join = ""  # 仅用于判定是否加空格
+
         for segment in segments:
-            #print(segment)
             if not segment.words:
                 continue
             for word in segment.words:
-                #print(word)
-                word_text = word.word
-                if not current_block["text"]:
-                    current_block = {"start": word.start, "end": word.end, "text": word_text.lstrip()}
+                wtxt = (word.word or "")
+                if not wtxt:
                     continue
 
-                potential_len = len(current_block["text"]) + len(word_text)
-                word_stripped = word_text.strip()
-                word_ends_clause = (
-                    word_stripped.endswith(END_OF_CLAUSE_CHARS)
-                    and len(word_stripped) == 1            # 只截断单独的句末标点
-)
+                # —— 是否为“单独句末标点” —— #
+                ws = wtxt.strip()
+                word_ends_clause = (ws.endswith(END_OF_CLAUSE_CHARS) and len(ws) == 1)
 
-                if potential_len <= max_chars:
-                    current_block["text"] += word_text
-                    current_block["end"] = word.end
+                if not current_block["text"]:
+                    # 第一词直接放入
+                    current_block = {"start": word.start, "end": word.end, "text": wtxt}
+                    prev_tok_for_join = wtxt
                     if word_ends_clause:
                         finalize_and_reset_block()
+                        prev_tok_for_join = ""
+                    continue
+
+                # —— 计算连接符（按相邻 token 判定，避免 language 误判） —— #
+                joiner = self._should_joiner(prev_tok_for_join, wtxt)
+                to_add = joiner + wtxt
+                potential_len = len(current_block["text"]) + len(to_add)
+
+                if potential_len <= max_chars:
+                    current_block["text"] += to_add
+                    current_block["end"] = word.end
+                    prev_tok_for_join = wtxt
+                    if word_ends_clause:
+                        finalize_and_reset_block()
+                        prev_tok_for_join = ""
                 elif potential_len <= max_chars_tolerance and word_ends_clause:
-                    current_block["text"] += word_text
+                    current_block["text"] += to_add
                     current_block["end"] = word.end
                     finalize_and_reset_block()
+                    prev_tok_for_join = ""
                 else:
                     finalize_and_reset_block()
-                    current_block = {"start": word.start, "end": word.end, "text": word_text.lstrip()}
-        
+                    current_block = {"start": word.start, "end": word.end, "text": wtxt}
+                    prev_tok_for_join = wtxt
+
         finalize_and_reset_block()
         return subtitle_blocks
     
@@ -630,7 +709,6 @@ class FasterWhisperProvider(TranscriptionProvider):
 
         # 1) 原始生成器
         segments_gen, info = pipeline.transcribe(input_audio, **transcribe_args)
-
         if verbose:
             show_dynamic_message(f"[Whisper] Language: {info.language}", f"[Whisper] 语言: {info.language}")
 
@@ -646,15 +724,20 @@ class FasterWhisperProvider(TranscriptionProvider):
                 show_dynamic_message("[Whisper] Aligning with script...", "[Whisper] 正在按文稿对齐...")
                 # 收集 Whisper 的逐词 token（不消耗 split 分支）
                 whisper_tokens = self._collect_words(segments_for_tokens, info.language)
+                print("----------------whisper_tokens----------------")
+                print(whisper_tokens)
+                print("----------------whisper_tokens----------------")
+                print("----------------match_text----------------")
+                print(match_text)
+                print("----------------match_text----------------")
                 # 规范化用户文稿为 token
                 match_tokens   = self._normalize_text(match_text, info.language)
+                print("----------------match_tokens----------------")
+                print(match_tokens)
+                print("----------------match_tokens----------------")
                 if not match_tokens:
                     raise RuntimeError("Empty tokens from script text")
                 # 覆盖率判定：当完全不匹配（或低于阈值）时，触发回退
-                coverage = self._token_match_coverage(whisper_tokens, match_tokens)
-                if coverage <= self.SCRIPT_MATCH_MIN_COVERAGE:
-                    raise RuntimeError(f"Script/audio zero-coverage: {coverage:.3f}")
-                # 用你的统一对齐算法返回“带时间的 words 序列生成器”
                 segments_to_split = self._align_time(whisper_tokens, match_tokens)
             except Exception as e:
                 print(f"[Script Match Fallback] {e}")
@@ -672,14 +755,16 @@ class FasterWhisperProvider(TranscriptionProvider):
                 try:
                     # 先把 Whisper 的逐词 token 收集出来（用 tokens 分支，避免消费 split 分支）
                     whisper_tokens = self._collect_words(segments_for_tokens, info.language)
-
+                    print("----------------whisper_tokens----------------")
+                    print(whisper_tokens)
+                    print("----------------whisper_tokens----------------")
                     # 缺少 API Key 时，直接回退避免无意义的联网尝试
                     api_key_for_refine = kwargs.get("api_key", "")
                     if not api_key_for_refine:
                         raise RuntimeError("Missing API key")
 
                     # 在线 refine（分片上传+合并）
-                    text = self._transcribe_audio(
+                    gpt_text = self._transcribe_audio(
                         file_path = input_audio,
                         api_key   = api_key_for_refine,
                         base_url  = kwargs.get("base_url", "https://api.openai.com/").rstrip('/'),
@@ -687,15 +772,19 @@ class FasterWhisperProvider(TranscriptionProvider):
                         hotwords  = None,
                         progress_callback = _net_progress
                     )
-
+                    print("----------------gpt_text----------------")
+                    print(gpt_text)
+                    print("----------------gpt_text----------------")
                     # 判空即触发回退
-                    if not text or not text.strip():
+                    if not gpt_text or not gpt_text.strip():
                         raise RuntimeError("Empty online transcript")
 
-                    gpt_tokens = self._normalize_text(text, info.language)
+                    gpt_tokens = self._normalize_text(gpt_text, info.language)
                     if not gpt_tokens:
                         raise RuntimeError("Empty tokenized transcript")
-
+                    print("----------------gpt_tokens----------------")
+                    print(gpt_tokens)
+                    print("----------------gpt_tokens----------------")
                     # 基于匹配关系对齐时间
                     segments_to_split = self._align_time(whisper_tokens, gpt_tokens)
                     ai_correct_applied = True
@@ -720,7 +809,19 @@ class FasterWhisperProvider(TranscriptionProvider):
 
         # 6) 分段
         subtitle_blocks = self._split_segments_by_max_chars(segments_to_split, int(max_chars))
+        #print(subtitle_blocks)
+        # 7.x) 帧量化 & 修复重叠/零时长
+        try:
+            _, _, _, _, _, fps_now = connect_resolve()
+        except Exception:
+            fps_now = 24.0
 
+        subtitle_blocks = _quantize_and_fix_blocks(
+            subtitle_blocks,
+            fps=fps_now,
+            enforce_no_gaps=items["NoGapCheckBox"].Checked,
+            min_frames=1
+        )
         # 7) 去间隙（可选）
         if remove_gaps:
             subtitle_blocks = self._remove_gaps_between_blocks(subtitle_blocks)
@@ -733,7 +834,7 @@ class FasterWhisperProvider(TranscriptionProvider):
             TRAIL_PUNCT_RE = re.compile(r"[，。！？、；：,.!?;:…\s]+$")
             for blk in subtitle_blocks:
                 blk["text"] = TRAIL_PUNCT_RE.sub("", blk["text"])
-
+        _refresh_subtitle_tree(subtitle_blocks)
         # 9) 输出 SRT
         if not output_filename:
             base = os.path.splitext(os.path.basename(input_audio))[0]
@@ -1050,6 +1151,7 @@ class OpenAIProvider(TranscriptionProvider):
 faster_whisper_provider = FasterWhisperProvider()
 openai_provider = OpenAIProvider()
 
+# ——（替换原 AddWindow 的 children 部分）——
 whisper_win = dispatcher.AddWindow(
     {
         "ID": 'WhisperWin',
@@ -1058,62 +1160,101 @@ whisper_win = dispatcher.AddWindow(
         "Spacing": 10,
         "StyleSheet": "*{font-size:14px;}"
     },
-    [
-        ui.VGroup([
-            ui.VGroup({"Weight":1},[
-                ui.Label({"ID":"TitleLabel","Text":"Create subtitles from audio","Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
-                
-                ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.5}),
-                    ui.ComboBox({"ID":"ModelCombo","Weight":0.4}),  
-                    ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0.1}),          
+    ui.VGroup([
+        # ---------- 上半部分：左右两栏 ----------
+        ui.HGroup([
+            # === 左侧参数区 ===
+            ui.VGroup([
+                ui.VGroup({"Weight":1},[
+                    ui.Label({"ID":"TitleLabel","Text":"Create subtitles from audio",
+                              "Alignment": {"AlignHCenter": True, "AlignVCenter": True},"Weight":0.1}),
+                    ui.HGroup({"Weight":0.1},[
+                        ui.Label({"ID":"ModelLabel","Text":"Model","Weight":0.5}),
+                        ui.ComboBox({"ID":"ModelCombo","Weight":0.4}),
+                        ui.CheckBox({"ID":"OnlineCheckBox", "Text":"Use OpenAI API", "Checked":False, "Weight":0}),
+                    ]),
+                    ui.HGroup({"Weight":0.1},[
+                        ui.Button({"ID":"DownloadButton","Text":"Download Model","Weight":1}),
+                    ]),
+                    ui.HGroup({"Weight":0.1},[
+                        ui.CheckBox({"ID":"MatchTextCheckBox", "Text":"文稿匹配", "Checked":False, "Weight":0}),
+                        ui.Label({"Text": ""}),
+                        ui.CheckBox({"ID":"AICorrectCheckBox", "Text":"AI Correct (beta)", "Checked":False, "Weight":0}),
+                    ]),
+                    ui.HGroup({"Weight":0.1},[
+                        ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.4}),
+                        ui.ComboBox({"ID":"LangCombo","Weight":0.6}),
+                    ]),
+                    ui.HGroup({"Weight":0.1},[
+                        ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.4}),
+                        ui.SpinBox({"ID": "MaxChars", "Minimum": 0, "Maximum": 100, "Value": 42,
+                                    "SingleStep": 1, "Weight": 0.6}),
+                    ]),
+                    ui.HGroup({"Weight":0.1},[
+                        ui.CheckBox({"ID":"NoGapCheckBox", "Text":"No Gaps Between Subtitles",
+                                     "Checked":False, "Weight":0}),
+                        ui.Label({"Text": ""}),
+                        ui.CheckBox({"ID":"TrimPunctCheckBox", "Text":"是否保留标点符号",
+                                     "Checked":False, "Weight":0}),
+                    ]),
+                    
+                    ui.Label({"ID":"HotwordsLabel","Text":"Phrases / Prompt","Weight":0.1}),
+                    ui.TextEdit({"ID":"Hotwords","Text":"","Weight":0.1}),
+                    ui.Button({"ID":"CreateButton","Text":"Create","Weight":0}),
                 ]),
-                ui.HGroup({"Weight":0.1},[
-                    #ui.Label({"ID":"BlankLabel","Text":"","Weight":0.5}),
-                    ui.Button({"ID":"DownloadButton","Text":"Download Model","Weight":1}),               
-                ]),
-                ui.HGroup({"Weight":0.1},[
-                    #ui.Label({"ID":"BlankLabel","Text":"","Weight":1}),
-                    ui.CheckBox({"ID":"MatchTextCheckBox", "Text":"文稿匹配", "Checked":False, "Weight":0}),
-                    ui.Label({"Text": ""}),
-                    ui.CheckBox({"ID":"AICorrectCheckBox", "Text":"AI Correct (beta)", "Checked":False, "Weight":0}),
-                ]),
-                
-                ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"LangLabel","Text":"Language","Weight":0.4}),
-                    ui.ComboBox({"ID":"LangCombo","Weight":0.6}),
-                ]),
-                ui.HGroup({"Weight":0.1},[
-                    ui.Label({"ID":"MaxCharsLabel","Text":"Max Chars","Weight":0.4}),
-                    ui.SpinBox({"ID": "MaxChars", "Minimum": 0, "Maximum": 100, "Value": 42, "SingleStep": 1, "Weight": 0.6}),
-                ]),
-                ui.HGroup({"Weight":0.1},[
-                    ui.CheckBox({"ID":"NoGapCheckBox", "Text":"No Gaps Between Subtitles", "Checked":False, "Weight":0}),
-                    ui.Label({"Text": ""}),
-                    ui.CheckBox({"ID":"TrimPunctCheckBox", "Text":"是否保留标点符号", "Checked":False, "Weight":0}),
-                ]),
-                
-                ui.Button({"ID":"CreateButton","Text":"Create","Weight":0.15}),
-                ui.Label({"ID":"HotwordsLabel","Text":"Phrases / Prompt","Weight":0.1}),
-                ui.TextEdit({"ID":"Hotwords","Text":"","Weight":0.1}),
-                ui.HGroup({"Weight":0.1},[
-                    ui.Label({"Text": ""}),
-                    ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
-                    ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":0}),
-                ]),
+            ], {"Weight": 4}),
+
+            # === 右侧 Tree + Editor ===
+            ui.VGroup([
+                ui.Label({
+                    "ID": "TreeTitleLabel",
+                    "Text": "Subtitles / 字幕",
+                    "Alignment": {"AlignHCenter": True, "AlignVCenter": True},
+                    "Weight": 0
+                }),
+                ui.Tree({
+                    "ID": "SubtitleTree",
+                    "AlternatingRowColors": True,
+                    "WordWrap": True,
+                    "UniformRowHeights": False,
+                    "HorizontalScrollMode": True,
+                    "FrameStyle": 1,
+                    "Weight": 1
+                }),
+                ui.TextEdit({
+                    "ID": "SubtitleEditor",
+                    "Weight": 0
+                }),
                 ui.Button({
-                        "ID": "CopyrightButton", 
-                        "Text": f"© 2025, Copyright by {SCRIPT_AUTHOR}",
-                        "Alignment": {"AlignHCenter": True, "AlignVCenter": True},
-                        "Font": ui.Font({"PixelSize": 12, "StyleName": "Bold"}),
-                        "Flat": True,
-                        "TextColor": [0.1, 0.3, 0.9, 1],
-                        "BackgroundColor": [1, 1, 1, 0],
-                        "Weight": 0
-                    })
-            ]),     
+                    "ID": "UpdateSubtitleButton",
+                    "Text": "更新字幕",
+                    "Weight": 0
+                }),
+            ], {"Weight": 6})
+        ], {"Weight": 1}),
+
+        # ---------- 下半部分：拆为两行 ----------
+        ui.VGroup({"Weight":0}, [
+            ui.HGroup({"Weight":0}, [
+                ui.Button({
+                    "ID": "CopyrightButton",
+                    "Text": f"© 2025, Copyright by {SCRIPT_AUTHOR}",
+                    "Alignment": {"AlignLeft": True, "AlignVCenter": True},  # 左对齐
+                    "Font": ui.Font({"PixelSize": 12, "StyleName": "Bold"}),
+                    "Flat": True,
+                    "TextColor": [0.1, 0.3, 0.9, 1],
+                    "BackgroundColor": [1, 1, 1, 0],
+                    "Weight": 0
+                }),
+                ui.Label({"Text": "", "Weight":1}),  # 左侧留白
+                ui.CheckBox({"ID":"LangEnCheckBox","Text":"EN","Checked":True,"Weight":0}),
+                ui.CheckBox({"ID":"LangCnCheckBox","Text":"简体中文","Checked":False,"Weight":0}),
+            ])
         ])
     ])
+)
+
+
 msgbox = dispatcher.AddWindow(
         {
             "ID": 'msg',
@@ -1167,19 +1308,45 @@ openai_config_window = dispatcher.AddWindow(
 match_window = dispatcher.AddWindow(
     {
         "ID": "ScriptMatchWin",
-        "WindowTitle": "文稿匹配",
-        "Geometry": [900, 380, 520, 360],
+        "WindowTitle": "Match Text",
+        "Geometry": [X_CENTER, Y_CENTER, WINDOW_WIDTH, WINDOW_HEIGHT],
         "Hidden": True,
         "StyleSheet": "*{font-size:14px;}"
     },
     [
         ui.VGroup([
-            ui.Label({"ID":"MatchInfoLabel","Text":"请在下方粘贴完整文稿（将按该文本对齐 Whisper 时间轴）：",
-                      "Alignment":{"AlignHCenter": True, "AlignVCenter": True},"Weight":0.2,'WordWrap': True}),
-            ui.TextEdit({"ID":"MatchTextEdit","Text":"","PlaceholderText":"","Weight":1}),
-            ui.HGroup({"Weight":0},[
-                ui.Button({"ID":"MatchConfirmBtn","Text":"确定","Weight":1}),
-                ui.Button({"ID":"MatchCancelBtn","Text":"取消","Weight":1}),
+            ui.Label({
+                "ID": "MatchInfoLabel",
+                "Text": "请在下方粘贴完整文稿（将按该文本对齐 Whisper 时间轴）：",
+                "Alignment": {"AlignHCenter": True, "AlignVCenter": True},
+                "Weight": 0.2,
+                'WordWrap': True
+            }),
+            # 将文本框与提示说明并排显示
+            ui.HGroup({"Weight": 1}, [
+                ui.VGroup({"Weight": 0.6},[
+                    ui.TextEdit({
+                        "ID": "MatchTextEdit",
+                        "Text": "",
+                        "PlaceholderText": "",
+                        "StyleSheet": "*{font-size:18px;}",
+                        "Weight": 3
+                    }),
+                ]),
+                
+                ui.VGroup({"Weight": 0.4},[
+                    ui.Label({
+                        "ID": "MatchTipLabel",
+                        "Text": "",
+                        'WordWrap': True,
+                        "Weight": 1
+                    }),
+                    ui.Label({"Text": "","Weight": 2}),
+                ])
+            ]),
+            ui.HGroup({"Weight": 0}, [
+                ui.Button({"ID": "MatchConfirmBtn", "Text": "确定", "Weight": 0.6}),
+                ui.Button({"ID": "MatchCancelBtn", "Text": "取消", "Weight": 0.4}),
             ])
         ])
     ]
@@ -1201,14 +1368,17 @@ translations = {
         "TitleLabel":"从音频创建字幕", 
         "LangLabel":"语言", 
         "ModelLabel":"模型", 
-        "CreateButton":"创建", 
+        "CreateButton":"创建字幕", 
         "DownloadButton":"模型下载",
         "HotwordsLabel":"短语列表 / 提示", 
         "MaxCharsLabel":"每行最大字符", 
         "NoGapCheckBox":"字幕间无空隙",
         "TrimPunctCheckBox":"删除句尾标点",
         "MatchTextCheckBox":"文稿匹配",
+        "TreeTitleLabel":"字幕",
+        "UpdateSubtitleButton": "更新字幕",
         "MatchInfoLabel":"请在下方粘贴完整文稿（将按该文本对齐）：",
+        "MatchTipLabel": "• 建议一句一换行，无标点符号\n• 句号、叹号、问号等会自动分句，逗号不会自动分句\n• 避免置入无标点和无换行的文本",
         #"MatchTextEdit":"在此粘贴全文...",
         "MatchConfirmBtn":"确定",
         "MatchCancelBtn":"取消",
@@ -1224,12 +1394,15 @@ translations = {
         "LangLabel":"Language", 
         "ModelLabel":"Model", 
         "DownloadButton":"Download Model",
-        "CreateButton":"Create", 
+        "CreateButton":"Create SRT", 
         "MatchTextCheckBox":"Match Text",
         "MatchInfoLabel":"Please paste the full document below (it will be aligned to this text):",
+        "MatchTipLabel": "• One sentence per line; avoid punctuation.\n• Periods/exclamation/question marks auto-split; commas do not.\n• Avoid text without punctuation or line breaks.",
         #"MatchTextEdit":"Paste the full text here...",
         "MatchConfirmBtn":"Confirm",
         "MatchCancelBtn":"Cancel",
+        "TreeTitleLabel":"Subtitle",
+        "UpdateSubtitleButton": "Update SRT",
         "CopyrightButton":f"More Features © 2025 by {SCRIPT_AUTHOR}",
         "HotwordsLabel":"Phrases / Prompt", 
         "MaxCharsLabel":"Max Chars", 
@@ -1247,6 +1420,10 @@ items = whisper_win.GetItems()
 msg_items = msgbox.GetItems()
 openai_items = openai_config_window.GetItems()
 match_items = match_window.GetItems()
+items["SubtitleTree"].SetHeaderLabels(["#", "Start", "End", "Subtitle"]) 
+items["SubtitleTree"].ColumnWidth[0] = 50    # 文件名
+items["SubtitleTree"].ColumnWidth[1] = 50    # 开始TC
+items["SubtitleTree"].ColumnWidth[2] = 50    # 结束TC
 for lang_display_name in LANGUAGE_MAP.keys():
     items["LangCombo"].AddItem(lang_display_name)
 
@@ -1283,6 +1460,7 @@ def on_match_checkbox_clicked(ev):
         items["AICorrectCheckBox"].Checked = False
         items["AICorrectCheckBox"].Enabled = False
         match_window.Show()
+        whisper_win.Hide()
     else:
         # 取消勾选 -> 恢复 AI Correct 的可用
         items["AICorrectCheckBox"].Enabled = True
@@ -1292,12 +1470,14 @@ whisper_win.On.MatchTextCheckBox.Clicked = on_match_checkbox_clicked
 
 def on_match_confirm(ev):
     match_window.Hide()  # 保持“文稿匹配”勾选状态不变
+    whisper_win.Show()
 
 def on_match_cancel(ev):
     # 取消则恢复现场：撤销勾选、恢复 AI Correct
     items["MatchTextCheckBox"].Checked = False
     items["AICorrectCheckBox"].Enabled = True
     match_window.Hide()
+    whisper_win.Show()
 
 match_window.On.MatchConfirmBtn.Clicked = on_match_confirm
 match_window.On.MatchCancelBtn.Clicked  = on_match_cancel
@@ -1460,6 +1640,210 @@ def render_timeline_audio(output_dir: str, custom_name: str) -> Optional[str]:
     project.DeleteRenderJob(job_id) # 
     return os.path.join(output_dir, f"{custom_name}.mp3")
 
+_editor_programmatic = False
+_selected_row_id = None
+_subtitle_blocks_state = []
+# —— 新增：把 subtitle_blocks 刷新到 Tree —— 
+def _frames_to_timecode(total_frames: int, fps: float) -> str:
+    int_fps = max(1, int(round(fps)))
+    if total_frames < 0:
+        total_frames = 0
+    frames = total_frames % int_fps
+    total_seconds = total_frames // int_fps
+    h = total_seconds // 3600
+    m = (total_seconds % 3600) // 60
+    s = total_seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}:{frames:02d}"
+
+def _secs_to_abs_timecode(seconds: float, fps: float, start_frame: int) -> str:
+    int_fps = max(1, int(round(fps)))
+    rel_frames = int(round(seconds * int_fps))
+    return _frames_to_timecode(start_frame + rel_frames, fps)
+
+def _refresh_subtitle_tree(subtitle_blocks):
+    global _subtitle_blocks_state
+    _subtitle_blocks_state = [dict(blk) for blk in subtitle_blocks]
+    try:
+        _, project, _, _, timeline, fps = connect_resolve()
+        start_frame = timeline.GetStartFrame() or 0   # 基准帧
+    except Exception:
+        fps = 24.0
+        start_frame = 0
+
+    tree = items.get("SubtitleTree")
+    if not tree:
+        return
+    tree.Clear()
+    tree.SetHeaderLabels(["#", "Start", "End", "Subtitle"])
+
+    for idx, blk in enumerate(subtitle_blocks, 1):
+        itm = tree.NewItem()
+        itm.Text[0] = str(idx)
+        itm.Text[1] = _secs_to_abs_timecode(blk["start"], fps, start_frame)  # 绝对 Start
+        itm.Text[2] = _secs_to_abs_timecode(blk["end"],   fps, start_frame)  # 绝对 End
+        itm.Text[3] = blk["text"].replace("\n", " ")
+        tree.AddTopLevelItem(itm)
+
+
+# 点击 Tree 的行，跳转到对应字幕开始时间码
+def _on_subtitle_tree_item_clicked(ev):
+    global _selected_row_id
+    tree = items["SubtitleTree"]
+    itm = tree.CurrentItem()
+    if not itm:
+        return
+
+    # 第2列存放开始时间码（形如 "HH:MM:SS:FF"）
+    start_tc = (itm.Text[1] or "").strip()
+    if not start_tc:
+        return
+
+    resolve, project, _, _, timeline, fps = connect_resolve()
+    if not timeline:
+        return
+    cur_page = resolve.GetCurrentPage() 
+    if cur_page not in ("cut", "edit", "color", "fairlight", "deliver"):
+        resolve.OpenPage("edit")  
+    ok = timeline.SetCurrentTimecode(start_tc)
+    now_tc = timeline.GetCurrentTimecode() 
+    print(f"[jump] request={start_tc}, ok={ok}, current={now_tc}")
+    _selected_row_id = itm.Text[0] or ""
+    try:
+        global _editor_programmatic
+        _editor_programmatic = True
+        items["SubtitleEditor"].Text = itm.Text[3] or ""   
+    finally:
+        _editor_programmatic = False
+whisper_win.On['SubtitleTree'].ItemClicked = _on_subtitle_tree_item_clicked
+
+def _on_subtitle_editor_text_changed(ev):
+    global _editor_programmatic, _selected_row_id
+    if _editor_programmatic:
+        return  # 程序化赋值时不回写，避免循环
+
+    tree = items["SubtitleTree"]
+    itm = tree.CurrentItem()
+    if not itm:
+        return
+    curr_id = itm.Text[0] or ""
+    if _selected_row_id and curr_id != _selected_row_id:
+        return
+    new_text = items["SubtitleEditor"].PlainText or ""
+    itm.Text[3] = new_text 
+    try:
+        idx = int(itm.Text[0])  # 第一列是序号，从 1 开始
+        if 1 <= idx <= len(_subtitle_blocks_state):
+            _subtitle_blocks_state[idx - 1]["text"] = new_text
+    except Exception:
+        pass
+whisper_win.On['SubtitleEditor'].TextChanged = _on_subtitle_editor_text_changed
+
+def _quantize_and_fix_blocks(blocks, fps, enforce_no_gaps=False, min_frames=1):
+    """
+    将字幕块按帧量化，并确保：
+    1) start/end 至少相差 min_frames 帧；
+    2) 不与上一条重叠；
+    3) 勾选了“无空隙”时，后一条 start == 前一条 end（但仍保证至少 1 帧时长）。
+    返回：新的 blocks（start/end 仍然用秒表示）。
+    """
+    int_fps = max(1, int(round(float(fps) or 24.0)))
+    fixed = []
+    prev_end_f = 0
+
+    for blk in blocks:
+        s_f = int(round(float(blk["start"]) * int_fps))
+        e_f = int(round(float(blk["end"])   * int_fps))
+
+        # 无空隙：下一条的 start 钳到上一条 end
+        if enforce_no_gaps:
+            s_f = max(s_f, prev_end_f)
+        else:
+            # 允许存在空隙，但绝不允许“向前穿插/重叠”
+            s_f = max(s_f, prev_end_f)
+
+        # 至少 1 帧时长
+        if e_f <= s_f:
+            e_f = s_f + min_frames
+
+        fixed.append({
+            "start": s_f / int_fps,
+            "end"  : e_f / int_fps,
+            "text" : blk.get("text", "")
+        })
+        prev_end_f = e_f
+
+    return fixed
+
+def _format_srt_time(seconds: float) -> str:
+    # 与 provider 内部一致：HH:MM:SS,mmm
+    ms = int(round((seconds - int(seconds)) * 1000))
+    s = int(seconds)
+    hh = s // 3600
+    mm = (s % 3600) // 60
+    ss = s % 60
+    return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
+
+def _write_srt_from_blocks(blocks, srt_path: str):
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, blk in enumerate(blocks, 1):
+            f.write(f"{i}\n")
+            f.write(f"{_format_srt_time(float(blk['start']))} --> {_format_srt_time(float(blk['end']))}\n")
+            f.write((blk["text"] or "").strip() + "\n\n")
+
+def on_update_subtitle_clicked(ev):
+    # 1) 基本校验
+    if not _subtitle_blocks_state:
+        show_dynamic_message("No subtitle data to export.", "没有可导出的字幕数据。")
+        return
+
+    resolve, project, _, _, timeline, _ = connect_resolve()
+    if not timeline:
+        show_dynamic_message("No active timeline.", "没有激活的时间线。")
+        return
+
+    # 2) 生成输出路径（自增序号）
+    timeline_name = timeline.GetName()
+    os.makedirs(SUB_TEMP_DIR, exist_ok=True)
+    pattern = os.path.join(SUB_TEMP_DIR, f"{timeline_name}_subtitle_update_{RAND_CODE}_*.srt")
+
+    indices = []
+    for p in glob.glob(pattern):
+        m = re.search(rf"_{RAND_CODE}_(\d+)\.srt$", os.path.basename(p))
+        if m:
+            try:
+                indices.append(int(m.group(1)))
+            except ValueError:
+                pass
+    next_idx = max(indices) + 1 if indices else 1
+    filename = f"{timeline_name}_subtitle_update_{RAND_CODE}_{next_idx}"
+    srt_path = os.path.join(SUB_TEMP_DIR, f"{filename}.srt")
+    # 3-) 量化并修复（使用当前时间线帧率）
+    try:
+        _, _, _, _, _, fps_now = connect_resolve()
+    except Exception:
+        fps_now = 24.0
+
+    sanitized_blocks = _quantize_and_fix_blocks(
+        _subtitle_blocks_state,
+        fps=fps_now,
+        enforce_no_gaps=items["NoGapCheckBox"].Checked,
+        min_frames=1
+    )
+    # 3) 写 SRT（以内存状态为准，避免绝对 TC 偏移）
+    try:
+        _write_srt_from_blocks(sanitized_blocks, srt_path)
+    except Exception as e:
+        show_dynamic_message(f"Write SRT failed: {e}", f"写入 SRT 失败：{e}")
+        return
+
+    # 4) 导入时间线（复用你已有的方法）
+    ok = import_srt_to_first_empty(srt_path)
+    if ok:
+        show_dynamic_message("Updated SRT imported.", "更新后的 SRT 已导入。")
+    else:
+        show_dynamic_message("Failed to import SRT.", "导入 SRT 失败。")
+whisper_win.On.UpdateSubtitleButton.Clicked = on_update_subtitle_clicked
+
 def on_create_clicked(ev):
     resolve, _, _, _, timeline, _ = connect_resolve()
     if not timeline:
@@ -1547,8 +1931,23 @@ whisper_win.On.CreateButton.Clicked = on_create_clicked
 def on_download_clicked(ev):
     show_dynamic_message("Place the downloaded model into the plugin's model folder.","请将下载的模型放入插件的 model 文件夹。")
     url = MODEL_LINK_EN if items["LangEnCheckBox"].Checked else MODEL_LINK_CN
+    # Optionally also open the model download page
     time.sleep(2)
     webbrowser.open(url)
+    # Ensure the model folder exists and open it in the OS file explorer
+    model_dir = os.path.join(SCRIPT_PATH, "model")
+    os.makedirs(model_dir, exist_ok=True)
+    try:
+        if sys.platform.startswith('darwin'):
+            subprocess.Popen(["open", model_dir])
+        elif os.name == 'nt':
+            os.startfile(model_dir)
+        else:
+            subprocess.Popen(["xdg-open", model_dir])
+    except Exception as e:
+        show_dynamic_message(f"Unable to open model folder: {e}", f"无法打开模型文件夹: {e}")
+
+    
 whisper_win.On.DownloadButton.Clicked = on_download_clicked
     
 def on_open_link_button_clicked(ev):
@@ -1592,9 +1991,97 @@ def on_close(ev):
     save_file()
     dispatcher.ExitLoop()
 whisper_win.On.WhisperWin.Close = on_close
+# ================== >>> 新增：把时间线现有字幕加载到 Tree ==================
 
+def _frames_to_seconds(frames: int, fps: float) -> float:
+    int_fps = max(1, int(round(float(fps) or 24.0)))
+    return float(frames) / float(int_fps)
+
+def _collect_subtitles_from_timeline(timeline) -> list:
+    """
+    从【当前时间线】采集启用的字幕轨上的字幕项，返回形如：
+    [{"start": <相对秒>, "end": <相对秒>, "text": <字符串>}, ...]
+    注意：start/end 为【相对时间线起点】的秒值（而非绝对帧换算的秒），
+    以适配你已有的 _refresh_subtitle_tree 内部“起始帧 + 相对秒 → 绝对TC”的逻辑。
+    """
+    blocks = []
+    if not timeline:
+        return blocks
+
+    try:
+        fps = float(timeline.GetSetting("timelineFrameRate"))  # 有的版本需从 project 取，你已有 connect_resolve 封装
+    except Exception:
+        # 回退到 connect_resolve 的 fps
+        try:
+            _, _, _, _, _, fps = connect_resolve()
+        except Exception:
+            fps = 24.0
+
+    try:
+        start_frame_base = timeline.GetStartFrame() or 0
+    except Exception:
+        start_frame_base = 0
+
+    try:
+        track_count = timeline.GetTrackCount("subtitle") or 0
+    except Exception:
+        track_count = 0
+
+    print(f"[load] subtitle tracks = {track_count}")
+
+    for track_index in range(1, track_count + 1):
+        try:
+            if not timeline.GetIsTrackEnabled("subtitle", track_index):
+                continue
+            items_in_track = timeline.GetItemListInTrack("subtitle", track_index) or []
+        except Exception as e:
+            print(f"[load] track {track_index} error: {e}")
+            continue
+
+        for it in items_in_track:
+            try:
+                s_f = int(it.GetStart())  # 帧
+                e_f = int(it.GetEnd())    # 帧
+                name = it.GetName() or ""
+
+                # —— 关键：换算成【相对时间线起点】的秒 —— #
+                s_rel_sec = _frames_to_seconds(max(0, s_f - start_frame_base), fps)
+                e_rel_sec = _frames_to_seconds(max(0, e_f - start_frame_base), fps)
+
+                # 最小时长兜底：至少 1 帧
+                if e_rel_sec <= s_rel_sec:
+                    e_rel_sec = s_rel_sec + (1.0 / max(1, int(round(fps))))
+
+                blocks.append({"start": s_rel_sec, "end": e_rel_sec, "text": name})
+            except Exception as e:
+                print(f"[load] item error: {e}")
+
+    # 统一排序，避免乱序
+    blocks.sort(key=lambda b: (b.get("start", 0.0), b.get("end", 0.0)))
+    return blocks
+
+def load_existing_subtitles_into_tree_once():
+    """
+    插件启动时调用：如果当前时间线存在字幕，则刷新到右侧 Tree；
+    若没有或读取失败，则静默跳过，不打断用户流程。
+    """
+    try:
+        resolve, project, _, _, timeline, _ = connect_resolve()
+        if not (project and timeline):
+            print("[load] no active project/timeline, skip")
+            return
+        blocks = _collect_subtitles_from_timeline(timeline)
+        if blocks:
+            _refresh_subtitle_tree(blocks)
+            print(f"[load] loaded {len(blocks)} subtitle blocks from timeline")
+        else:
+            print("[load] no subtitle items found on enabled subtitle tracks")
+    except Exception as e:
+        # 静默失败：不弹框，不干扰 UI
+        print(f"[load] failed: {e}")
 _loading_timer_stop = True
 loading_win.Hide() 
 whisper_win.Show()
+load_existing_subtitles_into_tree_once()
 dispatcher.RunLoop()
 whisper_win.Hide()

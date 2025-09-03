@@ -257,7 +257,8 @@ ul {
                 <li><a href="#ui-zh-8">8. 字幕间无空隙</a></li>
                 <li><a href="#ui-zh-9">9. 删除句尾标点</a></li>
                 <li><a href="#ui-zh-10">10. 短语列表 / 提示</a></li>
-                <li><a href="#ui-zh-11">11. 创建</a></li>
+                <li><a href="#ui-zh-11">11. 创建字幕</a></li>
+                <li><a href="#ui-zh-12">12. 更新字幕</a></li>
               </ul>
             </li>
             <li><a href="#api-config-zh">二、OpenAI API 配置</a></li>
@@ -427,7 +428,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
             </ul>
           </div>
 
-          <button type="button" class="collapsible" id="ui-zh-11">11. 创建</button>
+          <button type="button" class="collapsible" id="ui-zh-11">11. 创建字幕</button>
           <div class="collapsible-content">
             <ul>
               <li><strong>功能</strong>：这是启动所有操作的核心按钮。</li>
@@ -439,6 +440,19 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
                   <li>最后，自动将这个 SRT 文件导入到达芬奇的媒体池，并放置在时间线的第一个可用的字幕轨道上。</li>
                 </ol>
               </li>
+            </ul>
+          </div>
+
+          <button type="button" class="collapsible" id="ui-zh-12">12. 更新字幕</button>
+          <div class="collapsible-content">
+            <ul>
+              <li><strong>功能</strong>：无需重新转录，直接将右侧编辑器中你已修改的字幕内容导出为新的 SRT，并自动导入时间线（用于快速修订/纠错）。</li>
+              <li><strong>使用方法</strong>：
+                <ol>
+                  <li>在右侧字幕列表中选中一条字幕，底部文本框会显示其内容。</li>
+                  <li>在文本框中修改内容；可逐条选择并修改多处。</li>
+                  <li>点击【更新字幕】，插件会根据当前字幕列表与修改结果生成新的 SRT 并导入。</li>
+                </ol>
             </ul>
           </div>
 
@@ -529,6 +543,7 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
                 <li><a href="#ui-en-9">9. No End Punct.</a></li>
                 <li><a href="#ui-en-10">10. Phrases / Prompt</a></li>
                 <li><a href="#ui-en-11">11. Create</a></li>
+                <li><a href="#ui-en-12">12. Update SRT</a></li>
               </ul>
             </li>
             <li><a href="#api-config-en">II. OpenAI API Config</a></li>
@@ -714,6 +729,21 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility</code></
                   <li>Finally, it automatically imports this SRT file into the DaVinci Resolve media pool and places it on the first available subtitle track of the timeline.</li>
                 </ol>
               </li>
+            </ul>
+          </div>
+
+          <button type="button" class="collapsible" id="ui-en-12">12. Update SRT</button>
+          <div class="collapsible-content">
+            <ul>
+              <li><strong>Function</strong>: Export a new SRT from the edited subtitle text on the right, without re-transcribing audio, and auto-import it to the timeline (ideal for quick fixes).</li>
+              <li><strong>How to use</strong>:
+                <ol>
+                  <li>Select a subtitle row in the right list; the text will appear in the editor.</li>
+                  <li>Edit the text; repeat for any lines you want to correct.</li>
+                  <li>Click <strong>Update SRT</strong>; the plugin generates a new SRT from the current list and imports it.</li>
+                </ol>
+              </li>
+              
             </ul>
           </div>
 

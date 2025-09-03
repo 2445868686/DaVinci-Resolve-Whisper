@@ -6,3 +6,5 @@ Whisper/model/**/model.bin
 
 # Ignore system files
 .DS_Store
+
+Whisper/WhisperX.py
